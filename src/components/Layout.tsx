@@ -50,7 +50,11 @@ export default function Layout({ children }: LayoutProps) {
       setData(result);
     } catch (err: unknown) {
       if (err instanceof Error) {
-        setError(err.message);
+        const friendlyMessage =
+          err.message.includes("Network error") || err.message.includes("Could not connect to API")
+            ? "Live oppdatering fra databasen er ikke tilgjengelig da valget er over for denne gang. Hvis du vil ha tilgang til data, send en e-post til hanev@online.no."
+            : err.message;
+        setError(friendlyMessage);
       } else {
         setError("Ukjent feil");
       }

@@ -24,7 +24,7 @@ class KvasirApiService {
         throw error;
       }
       throw new ApiError(
-        'Network error: Could not connect to API',
+        'Live oppdatering fra databasen er ikke tilgjengelig da valget er over for denne gang. Hvis du vil ha tilgang til data, send en e-post til hanev@online.no.',
         0
       );
     }

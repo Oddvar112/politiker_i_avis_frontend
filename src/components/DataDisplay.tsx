@@ -239,7 +239,7 @@ function ArticleWithSummary({
           {sentimentAvailable && (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-gray-100 dark:border-gray-800">
               <SentimentRow
-                heading="Hvordan kandidaten omtaler"
+                heading="Hvordan kandidaten blir omtalt"
                 help="Sentiment i setninger hvor kandidaten er objektet – altså hvordan andre omtaler personen."
                 label={artikkel.faarSentiment}
                 positive={artikkel.faarPositivScore}
@@ -474,6 +474,126 @@ function StatCard({
   );
 }
 
+interface RegjeringMedlem {
+  id: string;
+  fornavn: string;
+  etternavn: string;
+  parti: string;
+  partiId: string;
+  tittel: string;
+  kjoenn: string;
+  sortering: number;
+}
+
+function RegjeringOversikt() {
+  const [medlemmer, setMedlemmer] = useState<RegjeringMedlem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('https://data.stortinget.no/eksport/regjering');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const text = await res.text();
+        const xml = new DOMParser().parseFromString(text, 'text/xml');
+        const nodes = Array.from(xml.getElementsByTagName('regjeringsmedlem'));
+        const parsed: RegjeringMedlem[] = nodes.map(n => {
+          const get = (tag: string) => n.getElementsByTagName(tag)[0]?.textContent?.trim() || '';
+          const partiNode = n.getElementsByTagName('parti')[0];
+          const partiNavn = partiNode?.getElementsByTagName('navn')[0]?.textContent?.trim() || '';
+          const partiId = partiNode?.getElementsByTagName('id')[0]?.textContent?.trim() || '';
+          return {
+            id: get('id'),
+            fornavn: get('fornavn'),
+            etternavn: get('etternavn'),
+            parti: partiNavn,
+            partiId,
+            tittel: get('tittel'),
+            kjoenn: get('kjoenn'),
+            sortering: parseInt(get('sortering') || '999', 10),
+          };
+        }).sort((a, b) => a.sortering - b.sortering);
+        if (!cancelled) {
+          setMedlemmer(parsed);
+          setLoading(false);
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : 'Kunne ikke hente regjeringsmedlemmer');
+          setLoading(false);
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  return (
+    <div className="mt-6 pt-5 border-t border-gray-200 dark:border-gray-800">
+      <div className="flex items-center gap-2 mb-4">
+        <svg className="w-4 h-4 text-amber-500" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M3 21h18M3 10h18M5 6l7-3 7 3M4 10v11m16-11v11M8 14v3m4-3v3m4-3v3" />
+        </svg>
+        <h4 className="text-sm font-bold tracking-tight">Regjeringen</h4>
+        <span className="text-[10px] uppercase tracking-wider font-bold text-gray-400 dark:text-gray-500 ml-auto">
+          {loading ? 'Laster…' : error ? 'Feil' : `${medlemmer.length} medlemmer`}
+        </span>
+      </div>
+
+      {loading && (
+        <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
+          {[...Array(8)].map((_, i) => (
+            <div key={i} className="flex flex-col items-center">
+              <div className="w-[72px] h-[96px] animate-shimmer rounded-lg" />
+              <div className="h-3 w-14 animate-shimmer rounded mt-2" />
+            </div>
+          ))}
+        </div>
+      )}
+
+      {error && (
+        <div className="text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-3">
+          {error}
+        </div>
+      )}
+
+      {!loading && !error && (
+        <div className="grid grid-cols-3 sm:grid-cols-4 gap-3 sm:gap-4 max-h-[280px] overflow-y-auto sidebar-scrollbar pr-1">
+          {medlemmer.map(m => (
+            <div
+              key={m.id}
+              className="flex flex-col items-center text-center group"
+              title={`${m.fornavn} ${m.etternavn} — ${m.tittel} (${m.parti})`}
+            >
+              <div className="relative w-[72px] h-[96px] rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700 shadow-sm group-hover:shadow-md group-hover:-translate-y-0.5 transition-all">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={`https://data.stortinget.no/eksport/personbilde?personid=${encodeURIComponent(m.id)}&storrelse=lite&erstatningsbilde=true`}
+                  alt={`${m.fornavn} ${m.etternavn}`}
+                  className="w-full h-full object-cover"
+                  loading="lazy"
+                />
+              </div>
+              <p className="mt-1.5 text-[11px] font-bold truncate max-w-full leading-tight">
+                {m.fornavn} {m.etternavn}
+              </p>
+              <p className="text-[10px] text-gray-500 dark:text-gray-400 truncate max-w-full leading-tight mt-0.5">
+                {m.tittel}
+              </p>
+              {m.partiId && (
+                <span className="mt-1 text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300">
+                  {m.partiId}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CandidateSentimentSummary({ person }: { person: Person }) {
   const { avg, count } = aggregateFaarScore(person);
   if (count === 0) {
@@ -676,7 +796,7 @@ export default function DataDisplay({ data, isLoading, error, dateRange, onDateR
       </div>
 
       {/* Kjønn + Parti side-om-side på større skjermer */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-10">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-10 items-start">
         {Object.keys(data.kjoennProsentFordeling).length > 0 && (
           <div className="kv-card kv-card-hover p-5 sm:p-6 animate-fade-in-up">
             <div className="flex items-center gap-3 mb-5">
@@ -702,6 +822,8 @@ export default function DataDisplay({ data, isLoading, error, dateRange, onDateR
                 </div>
               ))}
             </div>
+
+            <RegjeringOversikt />
           </div>
         )}
 
@@ -717,7 +839,7 @@ export default function DataDisplay({ data, isLoading, error, dateRange, onDateR
               {allePartier.length} partier
             </span>
           </div>
-          <div className="space-y-3.5 max-h-[420px] overflow-y-auto sidebar-scrollbar pr-1">
+          <div className="space-y-3.5 max-h-[380px] overflow-y-auto sidebar-scrollbar pr-1">
             {allePartier.map(([parti, prosent]) => {
               const antallGanger = data.partiMentions[parti] || 0;
               return (

@@ -568,32 +568,55 @@ function StatCard({
   );
 }
 
-interface RegjeringMedlem {
+interface Rikspolitiker {
   id: string;
   fornavn: string;
   etternavn: string;
   parti: string;
   partiId: string;
-  tittel: string;
+  tittel: string;      // f.eks. "Statsminister", eller "" for ren representant
   kjoenn: string;
-  sortering: number;
+  sortering: number;   // brukes til visning av regjering i rekkefølge
+  fylke: string;       // for representanter
+  erRegjering: boolean;
+  erVara: boolean;
 }
 
-function RegjeringOversikt() {
-  const [medlemmer, setMedlemmer] = useState<RegjeringMedlem[]>([]);
+type PolitikerFilter = 'regjering' | 'storting' | 'alle';
+
+// Nåværende stortingsperiode — oppdater ved nytt valg
+const STORTINGSPERIODE_ID = '2025-2029';
+
+function RegjeringOversikt({
+  personer,
+  onSelectPerson
+}: {
+  personer: Person[];
+  onSelectPerson: (fullName: string) => void;
+}) {
+  const [politikere, setPolitikere] = useState<Rikspolitiker[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [filter, setFilter] = useState<PolitikerFilter>('regjering');
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch('https://data.stortinget.no/eksport/regjering');
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const text = await res.text();
-        const xml = new DOMParser().parseFromString(text, 'text/xml');
-        const nodes = Array.from(xml.getElementsByTagName('regjeringsmedlem'));
-        const parsed: RegjeringMedlem[] = nodes.map(n => {
+        const [regRes, repRes] = await Promise.all([
+          fetch('https://data.stortinget.no/eksport/regjering'),
+          fetch(`https://data.stortinget.no/eksport/representanter?stortingsperiodeid=${STORTINGSPERIODE_ID}`),
+        ]);
+        if (!regRes.ok) throw new Error(`Regjering HTTP ${regRes.status}`);
+        if (!repRes.ok) throw new Error(`Representanter HTTP ${repRes.status}`);
+
+        const [regText, repText] = await Promise.all([regRes.text(), repRes.text()]);
+        const parser = new DOMParser();
+
+        // --- Parse regjering ---
+        const regXml = parser.parseFromString(regText, 'text/xml');
+        const regNodes = Array.from(regXml.getElementsByTagName('regjeringsmedlem'));
+        const regjering: Rikspolitiker[] = regNodes.map(n => {
           const get = (tag: string) => n.getElementsByTagName(tag)[0]?.textContent?.trim() || '';
           const partiNode = n.getElementsByTagName('parti')[0];
           const partiNavn = partiNode?.getElementsByTagName('navn')[0]?.textContent?.trim() || '';
@@ -607,15 +630,59 @@ function RegjeringOversikt() {
             tittel: get('tittel'),
             kjoenn: get('kjoenn'),
             sortering: parseInt(get('sortering') || '999', 10),
+            fylke: '',
+            erRegjering: true,
+            erVara: false,
           };
-        }).sort((a, b) => a.sortering - b.sortering);
+        });
+
+        // --- Parse representanter ---
+        const repXml = parser.parseFromString(repText, 'text/xml');
+        const repNodes = Array.from(repXml.getElementsByTagName('representant'));
+        const representanter: Rikspolitiker[] = repNodes.map(n => {
+          const get = (tag: string) => n.getElementsByTagName(tag)[0]?.textContent?.trim() || '';
+          const partiNode = n.getElementsByTagName('parti')[0];
+          const partiNavn = partiNode?.getElementsByTagName('navn')[0]?.textContent?.trim() || '';
+          const partiId = partiNode?.getElementsByTagName('id')[0]?.textContent?.trim() || '';
+          const fylkeNode = n.getElementsByTagName('fylke')[0];
+          const fylkeNavn = fylkeNode?.getElementsByTagName('navn')[0]?.textContent?.trim() || '';
+          const varaStr = get('vara_representant').toLowerCase();
+          return {
+            id: get('id'),
+            fornavn: get('fornavn'),
+            etternavn: get('etternavn'),
+            parti: partiNavn,
+            partiId,
+            tittel: '',
+            kjoenn: get('kjoenn'),
+            sortering: 999,
+            fylke: fylkeNavn,
+            erRegjering: false,
+            erVara: varaStr === 'true',
+          };
+        });
+
+        // --- Dedup by id, regjering vinner (beholder tittel) ---
+        const byId = new Map<string, Rikspolitiker>();
+        for (const r of representanter) byId.set(r.id, r);
+        for (const r of regjering) {
+          const existing = byId.get(r.id);
+          byId.set(r.id, {
+            ...r,
+            fylke: existing?.fylke || r.fylke,
+            erVara: existing?.erVara || false,
+          });
+        }
+
+        const merged = Array.from(byId.values());
+
         if (!cancelled) {
-          setMedlemmer(parsed);
+          setPolitikere(merged);
           setLoading(false);
         }
       } catch (e) {
         if (!cancelled) {
-          setError(e instanceof Error ? e.message : 'Kunne ikke hente regjeringsmedlemmer');
+          setError(e instanceof Error ? e.message : 'Kunne ikke hente rikspolitikere');
           setLoading(false);
         }
       }
@@ -623,17 +690,64 @@ function RegjeringOversikt() {
     return () => { cancelled = true; };
   }, []);
 
+  const visible = politikere
+    .filter(p => {
+      if (filter === 'regjering') return p.erRegjering;
+      if (filter === 'storting') return !p.erVara; // faste representanter
+      return true; // alle (inkl. vara)
+    })
+    .sort((a, b) => {
+      // Regjering først sortert etter sortering, så representanter alfabetisk på etternavn
+      if (a.erRegjering && b.erRegjering) return a.sortering - b.sortering;
+      if (a.erRegjering) return -1;
+      if (b.erRegjering) return 1;
+      return a.etternavn.localeCompare(b.etternavn, 'no');
+    });
+
+  const filterLabels: Record<PolitikerFilter, string> = {
+    regjering: 'Regjering',
+    storting: 'Storting',
+    alle: 'Alle',
+  };
+
+  const overskrift =
+    filter === 'regjering' ? 'Regjeringen' :
+    filter === 'storting'  ? 'Stortinget' :
+                             'Rikspolitikere';
+
   return (
     <div className="mt-6 pt-5 border-t border-gray-200 dark:border-gray-800">
-      <div className="flex items-center gap-2 mb-4">
+      <div className="flex items-center gap-2 mb-3">
         <svg className="w-4 h-4 text-amber-500" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" d="M3 21h18M3 10h18M5 6l7-3 7 3M4 10v11m16-11v11M8 14v3m4-3v3m4-3v3" />
         </svg>
-        <h4 className="text-sm font-bold tracking-tight">Regjeringen</h4>
+        <h4 className="text-sm font-bold tracking-tight">{overskrift}</h4>
         <span className="text-[10px] uppercase tracking-wider font-bold text-gray-400 dark:text-gray-500 ml-auto">
-          {loading ? 'Laster…' : error ? 'Feil' : `${medlemmer.length} medlemmer`}
+          {loading ? 'Laster…' : error ? 'Feil' : `${visible.length}`}
         </span>
       </div>
+
+      {/* Filter-pills */}
+      {!loading && !error && (
+        <div className="flex gap-1 p-1 bg-gray-100/70 dark:bg-gray-800/50 rounded-lg border border-gray-200/60 dark:border-gray-700/60 mb-3">
+          {(Object.keys(filterLabels) as PolitikerFilter[]).map(k => {
+            const active = filter === k;
+            return (
+              <button
+                key={k}
+                onClick={() => setFilter(k)}
+                className={`flex-1 px-2 py-1 text-[11px] font-semibold rounded-md transition-all ${
+                  active
+                    ? 'bg-white dark:bg-gray-900 text-indigo-600 dark:text-indigo-400 shadow-sm'
+                    : 'text-gray-600 dark:text-gray-400 hover:text-foreground'
+                }`}
+              >
+                {filterLabels[k]}
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {loading && (
         <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
@@ -654,34 +768,89 @@ function RegjeringOversikt() {
 
       {!loading && !error && (
         <div className="grid grid-cols-3 sm:grid-cols-4 gap-3 sm:gap-4 max-h-[280px] overflow-y-auto sidebar-scrollbar pr-1">
-          {medlemmer.map(m => (
-            <div
-              key={m.id}
-              className="flex flex-col items-center text-center group"
-              title={`${m.fornavn} ${m.etternavn} — ${m.tittel} (${m.parti})`}
-            >
-              <div className="relative w-[72px] h-[96px] rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700 shadow-sm group-hover:shadow-md group-hover:-translate-y-0.5 transition-all">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={`https://data.stortinget.no/eksport/personbilde?personid=${encodeURIComponent(m.id)}&storrelse=lite&erstatningsbilde=true`}
-                  alt={`${m.fornavn} ${m.etternavn}`}
-                  className="w-full h-full object-cover"
-                  loading="lazy"
-                />
-              </div>
-              <p className="mt-1.5 text-[11px] font-bold truncate max-w-full leading-tight">
-                {m.fornavn} {m.etternavn}
-              </p>
-              <p className="text-[10px] text-gray-500 dark:text-gray-400 truncate max-w-full leading-tight mt-0.5">
-                {m.tittel}
-              </p>
-              {m.partiId && (
-                <span className="mt-1 text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300">
-                  {m.partiId}
-                </span>
-              )}
-            </div>
-          ))}
+          {visible.map(m => {
+            const fullName = `${m.fornavn} ${m.etternavn}`;
+
+            // Split fornavn/etternavn hver for seg — Stortinget kan putte flere ord i "fornavn"
+            // (f.eks. fornavn="Lubna Boby" etternavn="Jaffery")
+            const fornavnTokens = m.fornavn.toLowerCase().trim().split(/\s+/).filter(Boolean);
+            const etternavnTokens = m.etternavn.toLowerCase().trim().split(/\s+/).filter(Boolean);
+            const firstGiven = fornavnTokens[0] || '';
+            const lastSurname = etternavnTokens[etternavnTokens.length - 1] || '';
+
+            // Fleksibel matching: datasettet kan ha forkortet navn uten mellomnavn
+            const match = personer.find(p => {
+              const pLc = p.navn.toLowerCase().trim();
+              // 1) Eksakt match på hele navnet
+              if (pLc === fullName.toLowerCase()) return true;
+
+              const parts = pLc.split(/\s+/).filter(Boolean);
+              if (parts.length < 2 || !firstGiven || !lastSurname) return false;
+
+              // 2) Første ord matcher fornavnets første token OG siste ord matcher etternavnets siste token
+              //    Dekker: "Lubna Jaffery" ↔ "Lubna Boby Jaffery", "Jonas Støre" ↔ "Jonas Gahr Støre"
+              const first = parts[0];
+              const last = parts[parts.length - 1];
+              if (first === firstGiven && last === lastSurname) return true;
+
+              // 3) Fallback: personens fornavn+etternavn-tokens er alle til stede i datasett-navnet
+              const pTokens = new Set(parts);
+              const allGivenPresent = fornavnTokens.every(t => pTokens.has(t));
+              const allSurnamePresent = etternavnTokens.every(t => pTokens.has(t));
+              if (allGivenPresent && allSurnamePresent) return true;
+
+              return false;
+            });
+            const hasData = !!match;
+            return (
+              <button
+                key={m.id}
+                type="button"
+                onClick={() => hasData && onSelectPerson(match!.navn)}
+                disabled={!hasData}
+                className={`flex flex-col items-center text-center group rounded-lg p-1 -m-1 transition-all ${
+                  hasData
+                    ? 'cursor-pointer hover:bg-indigo-50/60 dark:hover:bg-indigo-900/20'
+                    : 'opacity-60 cursor-not-allowed'
+                }`}
+                title={
+                  hasData
+                    ? `Se stats for ${fullName} (${match!.antallArtikler} artikler)`
+                    : `${fullName} — ingen omtale i datasettet`
+                }
+              >
+                <div className={`relative w-[72px] h-[96px] rounded-lg overflow-hidden border shadow-sm transition-all ${
+                  hasData
+                    ? 'border-gray-200 dark:border-gray-700 group-hover:shadow-md group-hover:-translate-y-0.5 group-hover:border-indigo-400 dark:group-hover:border-indigo-500'
+                    : 'border-gray-200 dark:border-gray-700 grayscale'
+                }`}>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={`https://data.stortinget.no/eksport/personbilde?personid=${encodeURIComponent(m.id)}&storrelse=lite&erstatningsbilde=true`}
+                    alt={fullName}
+                    className="w-full h-full object-cover"
+                    loading="lazy"
+                  />
+                  {hasData && (
+                    <span className="absolute top-1 right-1 text-[9px] font-extrabold px-1.5 py-0.5 rounded-md bg-indigo-600 text-white shadow-sm tabular-nums">
+                      {match!.antallArtikler}
+                    </span>
+                  )}
+                </div>
+                <p className="mt-1.5 text-[11px] font-bold truncate max-w-full leading-tight">
+                  {fullName}
+                </p>
+                <p className="text-[10px] text-gray-500 dark:text-gray-400 truncate max-w-full leading-tight mt-0.5">
+                  {m.tittel || m.fylke || (m.erVara ? 'Vararepresentant' : '')}
+                </p>
+                {m.partiId && (
+                  <span className="mt-1 text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300">
+                    {m.partiId}
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </div>
       )}
     </div>
@@ -779,6 +948,28 @@ export default function DataDisplay({ data, isLoading, error, dateRange, onDateR
   const toggleExpandCandidate = (candidateName: string) => {
     setExpandedCandidate(expandedCandidate === candidateName ? null : candidateName);
     setShowAllArticles(false);
+  };
+
+  // Når man trykker på et regjeringsmedlem: expand kandidaten og scroll dit
+  const handleSelectFromRegjering = (fullName: string) => {
+    // Finn kandidaten — må være i datasettet for å kunne klikkes (RegjeringOversikt sjekker dette)
+    const sorted = [...(data?.allePersonernevnt || [])].sort((a, b) => b.antallArtikler - a.antallArtikler);
+    const index = sorted.findIndex(p => p.navn.toLowerCase() === fullName.toLowerCase());
+    if (index === -1) return;
+
+    // Sikre at kandidaten er synlig (top 10 eller alle)
+    if (index >= 10) setShowAllCandidates(true);
+
+    setExpandedCandidate(fullName);
+    setShowAllArticles(false);
+
+    // Scroll til kandidat-raden etter render
+    setTimeout(() => {
+      const el = document.getElementById(`kandidat-${fullName}`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }, 120);
   };
 
   const getSourceDisplayName = (kilde: string) => {
@@ -917,7 +1108,10 @@ export default function DataDisplay({ data, isLoading, error, dateRange, onDateR
               ))}
             </div>
 
-            <RegjeringOversikt />
+            <RegjeringOversikt
+              personer={data.allePersonernevnt}
+              onSelectPerson={handleSelectFromRegjering}
+            />
           </div>
         )}
 
@@ -1013,7 +1207,8 @@ export default function DataDisplay({ data, isLoading, error, dateRange, onDateR
             return (
               <div
                 key={person.navn}
-                className={`kv-card kv-card-hover overflow-hidden ${isExpanded ? 'ring-2 ring-indigo-400/40 dark:ring-indigo-500/40' : ''}`}
+                id={`kandidat-${person.navn}`}
+                className={`kv-card kv-card-hover overflow-hidden scroll-mt-24 ${isExpanded ? 'ring-2 ring-indigo-400/40 dark:ring-indigo-500/40' : ''}`}
               >
                 <div
                   role="button"

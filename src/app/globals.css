@@ -404,5 +404,3 @@ body {
 .kv-party-mdg { border-left-color: #16a34a; }
 .kv-party-r  { border-left-color: #7f1d1d; }
 
-/* Ensure content sits above the noise overlay */
-main, body > * { position: relative; z-index: 1; }

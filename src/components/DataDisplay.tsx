@@ -362,6 +362,61 @@ function DateRangeSelector({ dateRange, onDateRangeChange, onResetDateFilter, se
   };
 
   const hasActiveFilter = dateRange.fraDato || dateRange.tilDato;
+  const [showCustom, setShowCustom] = useState(false);
+
+  // Helper: lag normalisert dato uten tid
+  const dayOnly = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+
+  const daysBetween = (a: Date, b: Date) =>
+    Math.round((dayOnly(b).getTime() - dayOnly(a).getTime()) / 86400000);
+
+  // Beregn hvilken preset som er aktiv akkurat nå
+  const activePreset: string = (() => {
+    if (!dateRange.fraDato || !dateRange.tilDato) return 'alle';
+    const todayD = dayOnly(today);
+    const tilD = dayOnly(dateRange.tilDato);
+    const fraD = dayOnly(dateRange.fraDato);
+    if (tilD.getTime() !== todayD.getTime()) return 'custom';
+    const diff = daysBetween(fraD, todayD);
+    if (diff === 0) return 'idag';
+    if (diff === 6) return '7d';
+    if (diff === 29) return '30d';
+    if (diff === 89) return '90d';
+    if (fraD.getTime() === dayOnly(minimumDate).getTime()) return 'alle';
+    return 'custom';
+  })();
+
+  const applyPreset = (key: string) => {
+    const todayD = new Date();
+    if (key === 'alle') {
+      onDateRangeChange({ fraDato: minimumDate, tilDato: todayD });
+    } else if (key === 'idag') {
+      onDateRangeChange({ fraDato: todayD, tilDato: todayD });
+    } else if (key === '7d') {
+      const from = new Date(todayD); from.setDate(from.getDate() - 6);
+      onDateRangeChange({ fraDato: from, tilDato: todayD });
+    } else if (key === '30d') {
+      const from = new Date(todayD); from.setDate(from.getDate() - 29);
+      onDateRangeChange({ fraDato: from, tilDato: todayD });
+    } else if (key === '90d') {
+      const from = new Date(todayD); from.setDate(from.getDate() - 89);
+      onDateRangeChange({ fraDato: from, tilDato: todayD });
+    }
+    setShowCustom(false);
+    setShowValidationWarning(null);
+  };
+
+  const presets: { key: string; label: string }[] = [
+    { key: 'idag', label: 'I dag' },
+    { key: '7d', label: 'Siste 7 dager' },
+    { key: '30d', label: 'Siste 30 dager' },
+    { key: '90d', label: 'Siste 3 mnd' },
+    { key: 'alle', label: 'Hele perioden' },
+  ];
+
+  const rangeLabel = dateRange.fraDato && dateRange.tilDato
+    ? `${kvasirApi.formatNorwegianDate(dateRange.fraDato)} – ${kvasirApi.formatNorwegianDate(dateRange.tilDato)}`
+    : 'Ingen datofilter';
 
   return (
     <div className="kv-card p-5 sm:p-6 mb-8 relative overflow-hidden">
@@ -369,62 +424,101 @@ function DateRangeSelector({ dateRange, onDateRangeChange, onResetDateFilter, se
         className="absolute inset-0 opacity-[0.06] pointer-events-none"
         style={{ background: 'radial-gradient(600px 200px at 10% 0%, #4f46e5, transparent 60%)' }}
       />
-      <div className="relative flex flex-col lg:flex-row lg:items-end gap-5">
-        <div className="flex-1 flex items-center gap-4">
-          <div className="kv-icon-badge kv-icon-badge-blue">
+      <div className="relative flex flex-col gap-4">
+        <div className="flex items-center gap-4 flex-wrap">
+          <div className="kv-icon-badge kv-icon-badge-blue flex-shrink-0">
             <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" d="M8 7V3m8 4V3m-9 8h10m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
             </svg>
           </div>
-          <div>
+          <div className="flex-1 min-w-0">
             <h3 className="text-base font-bold tracking-tight">Tidsrom</h3>
-            <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-              Data fra <span className="font-medium text-foreground">{kvasirApi.formatNorwegianDate(minimumDate)}</span> til i dag
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5 truncate">
+              {rangeLabel}
             </p>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowCustom(s => !s)}
+              className={`px-3 py-2 text-xs font-semibold rounded-xl border transition-all flex items-center gap-1.5 shadow-sm ${
+                showCustom || activePreset === 'custom'
+                  ? 'bg-indigo-50 dark:bg-indigo-900/30 border-indigo-300 dark:border-indigo-700 text-indigo-700 dark:text-indigo-300'
+                  : 'bg-white/60 dark:bg-gray-800/60 border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:border-gray-300'
+              }`}
+            >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
+              </svg>
+              Egendefinert
+            </button>
+            {hasActiveFilter && activePreset !== 'alle' && (
+              <button
+                onClick={onResetDateFilter}
+                className="px-3 py-2 text-xs font-semibold text-gray-600 dark:text-gray-300 bg-white/60 dark:bg-gray-800/60 border border-gray-200 dark:border-gray-700 rounded-xl hover:bg-white dark:hover:bg-gray-800 transition-all shadow-sm"
+                title="Tilbakestill til hele perioden"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            )}
           </div>
         </div>
 
-        <div className="flex flex-col sm:flex-row gap-3 sm:items-end">
-          <div className="flex flex-col gap-1.5">
-            <label htmlFor="fraDato" className="text-[10px] uppercase tracking-[0.12em] font-bold text-gray-500 dark:text-gray-400">
-              Fra
-            </label>
-            <input
-              id="fraDato"
-              type="date"
-              value={formatDateForInput(dateRange.fraDato)}
-              onChange={handleFromDateChange}
-              min={formatDateForInput(minimumDate)}
-              max={formatDateForInput(today)}
-              className="px-3.5 py-2.5 text-sm font-medium border border-gray-200 dark:border-gray-700 rounded-xl bg-white/70 dark:bg-gray-900/70 backdrop-blur text-foreground focus:outline-none focus:ring-2 focus:ring-indigo-500/60 focus:border-indigo-400 shadow-sm hover:border-gray-300 dark:hover:border-gray-600 transition-colors"
-            />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <label htmlFor="tilDato" className="text-[10px] uppercase tracking-[0.12em] font-bold text-gray-500 dark:text-gray-400">
-              Til
-            </label>
-            <input
-              id="tilDato"
-              type="date"
-              value={formatDateForInput(dateRange.tilDato)}
-              onChange={handleToDateChange}
-              min={formatDateForInput(dateRange.fraDato || minimumDate)}
-              max={formatDateForInput(today)}
-              className="px-3.5 py-2.5 text-sm font-medium border border-gray-200 dark:border-gray-700 rounded-xl bg-white/70 dark:bg-gray-900/70 backdrop-blur text-foreground focus:outline-none focus:ring-2 focus:ring-indigo-500/60 focus:border-indigo-400 shadow-sm hover:border-gray-300 dark:hover:border-gray-600 transition-colors"
-            />
-          </div>
-          {hasActiveFilter && (
-            <button
-              onClick={onResetDateFilter}
-              className="px-4 py-2.5 text-xs font-semibold text-gray-600 dark:text-gray-300 bg-white/60 dark:bg-gray-800/60 backdrop-blur border border-gray-200 dark:border-gray-700 rounded-xl hover:bg-white dark:hover:bg-gray-800 hover:border-gray-300 dark:hover:border-gray-600 transition-all shadow-sm flex items-center gap-1.5"
-            >
-              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-              </svg>
-              Tilbakestill
-            </button>
-          )}
+        {/* Preset-pills som segmentert kontroll */}
+        <div className="flex flex-wrap gap-1.5 p-1 bg-gray-100/70 dark:bg-gray-800/50 rounded-xl border border-gray-200/60 dark:border-gray-700/60">
+          {presets.map(p => {
+            const active = activePreset === p.key;
+            return (
+              <button
+                key={p.key}
+                onClick={() => applyPreset(p.key)}
+                className={`flex-1 min-w-[90px] px-3 py-1.5 text-xs font-semibold rounded-lg transition-all ${
+                  active
+                    ? 'bg-white dark:bg-gray-900 text-indigo-600 dark:text-indigo-400 shadow-sm'
+                    : 'text-gray-600 dark:text-gray-400 hover:text-foreground hover:bg-white/50 dark:hover:bg-gray-900/50'
+                }`}
+              >
+                {p.label}
+              </button>
+            );
+          })}
         </div>
+
+        {/* Egendefinert dato-panel (collapsible) */}
+        {showCustom && (
+          <div className="flex flex-col sm:flex-row gap-3 pt-2 border-t border-gray-200 dark:border-gray-800 animate-fade-in-up">
+            <div className="flex-1 flex flex-col gap-1.5">
+              <label htmlFor="fraDato" className="text-[10px] uppercase tracking-[0.12em] font-bold text-gray-500 dark:text-gray-400">
+                Fra
+              </label>
+              <input
+                id="fraDato"
+                type="date"
+                value={formatDateForInput(dateRange.fraDato)}
+                onChange={handleFromDateChange}
+                min={formatDateForInput(minimumDate)}
+                max={formatDateForInput(today)}
+                className="px-3.5 py-2.5 text-sm font-medium border border-gray-200 dark:border-gray-700 rounded-xl bg-white/70 dark:bg-gray-900/70 text-foreground focus:outline-none focus:ring-2 focus:ring-indigo-500/60 focus:border-indigo-400 shadow-sm"
+              />
+            </div>
+            <div className="flex-1 flex flex-col gap-1.5">
+              <label htmlFor="tilDato" className="text-[10px] uppercase tracking-[0.12em] font-bold text-gray-500 dark:text-gray-400">
+                Til
+              </label>
+              <input
+                id="tilDato"
+                type="date"
+                value={formatDateForInput(dateRange.tilDato)}
+                onChange={handleToDateChange}
+                min={formatDateForInput(dateRange.fraDato || minimumDate)}
+                max={formatDateForInput(today)}
+                className="px-3.5 py-2.5 text-sm font-medium border border-gray-200 dark:border-gray-700 rounded-xl bg-white/70 dark:bg-gray-900/70 text-foreground focus:outline-none focus:ring-2 focus:ring-indigo-500/60 focus:border-indigo-400 shadow-sm"
+              />
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

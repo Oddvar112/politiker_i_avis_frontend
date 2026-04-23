@@ -1,12 +1,4 @@
-import { DataDTO, SammendragDTO, DateRange } from "@/types/api";
-
-// Hjelpefunksjon for å få lokal dato i YYYY-MM-DD (samme som input type="date" forventer)
-function formatDateLocalInput(date: Date): string {
-  const year = date.getFullYear();
-  const month = (date.getMonth() + 1).toString().padStart(2, '0');
-  const day = date.getDate().toString().padStart(2, '0');
-  return `${year}-${month}-${day}`;
-}
+import { DataDTO, SammendragDTO, DateRange, ArtikelDTO, SentimentLabel, Person } from "@/types/api";
 import { useState, useEffect } from "react";
 import { kvasirApi } from "../services/kvasirApi";
 import React from "react";
@@ -20,10 +12,96 @@ interface DataDisplayProps {
   onResetDateFilter: () => void;
 }
 
-interface ArticlePreviewProps {
-  url: string;
-  active: boolean;
-  priority: number;
+// === Sentiment-hjelpere ===
+function sentimentMeta(label: SentimentLabel | null | undefined) {
+  switch (label) {
+    case "POSITIV":
+      return { text: "Positiv", cls: "kv-sentiment kv-sentiment-positive", icon: "▲" };
+    case "NEGATIV":
+      return { text: "Negativ", cls: "kv-sentiment kv-sentiment-negative", icon: "▼" };
+    case "NOYTRAL":
+      return { text: "Nøytral", cls: "kv-sentiment kv-sentiment-neutral", icon: "■" };
+    default:
+      return null;
+  }
+}
+
+function hasSentiment(a: ArtikelDTO): boolean {
+  return !!(a.girSentiment || a.faarSentiment);
+}
+
+/** Beregner en aggregert sentiment-score (-1 til 1) per person basert på faar-scores. */
+function aggregateFaarScore(person: Person): { avg: number; count: number } {
+  const scored = person.lenker.filter(l => l.faarPositivScore !== null && l.faarNegativScore !== null);
+  if (scored.length === 0) return { avg: 0, count: 0 };
+  const sum = scored.reduce((acc, l) => acc + ((l.faarPositivScore || 0) - (l.faarNegativScore || 0)), 0);
+  return { avg: sum / scored.length, count: scored.length };
+}
+
+// === Små komponenter ===
+function SentimentPill({ label }: { label: SentimentLabel | null | undefined }) {
+  const meta = sentimentMeta(label);
+  if (!meta) return null;
+  return (
+    <span className={meta.cls} title={`Sentiment: ${meta.text}`}>
+      <span aria-hidden>{meta.icon}</span>
+      {meta.text}
+    </span>
+  );
+}
+
+function SentimentBar({ positive, negative }: { positive: number | null; negative: number | null }) {
+  if (positive === null || negative === null) return null;
+  const total = positive + negative;
+  const posWidth = total > 0 ? (positive / total) * 100 : 50;
+  const negWidth = 100 - posWidth;
+  return (
+    <div className="flex items-center gap-2 w-full">
+      <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold min-w-[32px]">
+        {(positive * 100).toFixed(0)}%
+      </span>
+      <div className="kv-sentiment-bar flex-1">
+        <div className="kv-sentiment-bar-positive" style={{ width: `${posWidth}%` }} />
+        <div className="kv-sentiment-bar-negative" style={{ width: `${negWidth}%` }} />
+      </div>
+      <span className="text-[10px] text-rose-600 dark:text-rose-400 font-semibold min-w-[32px] text-right">
+        {(negative * 100).toFixed(0)}%
+      </span>
+    </div>
+  );
+}
+
+function SentimentRow({
+  heading,
+  label,
+  positive,
+  negative,
+  help
+}: {
+  heading: string;
+  label: SentimentLabel | null;
+  positive: number | null;
+  negative: number | null;
+  help: string;
+}) {
+  if (!label && positive === null && negative === null) return null;
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-semibold text-gray-700 dark:text-gray-300">{heading}</span>
+          <span
+            className="text-[10px] text-gray-400 dark:text-gray-500 cursor-help"
+            title={help}
+          >
+            ⓘ
+          </span>
+        </div>
+        <SentimentPill label={label} />
+      </div>
+      <SentimentBar positive={positive} negative={negative} />
+    </div>
+  );
 }
 
 function ArticlePreview({ url }: { url: string }) {
@@ -42,17 +120,17 @@ function ArticlePreview({ url }: { url: string }) {
   };
   const domainInfo = getDomainInfo(url);
   return (
-    <div className="w-20 sm:w-32 h-16 sm:h-20 flex-shrink-0 bg-gray-50 dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700 overflow-hidden p-0 flex items-center justify-center">
+    <div className="w-16 sm:w-24 h-14 sm:h-16 flex-shrink-0 bg-gray-50 dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden flex items-center justify-center">
       {domainInfo.logo ? (
-        <img 
-          src={domainInfo.logo} 
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={domainInfo.logo}
           alt={`${domainInfo.name} logo`}
           className="w-full h-full object-cover"
-          style={{ objectFit: 'cover', width: '100%', height: '100%' }}
         />
       ) : (
         <div className="w-full h-full flex items-center justify-center">
-          <div className={`w-10 h-10 sm:w-14 sm:h-14 ${domainInfo.color} rounded-full flex items-center justify-center text-white text-lg font-bold`}>
+          <div className={`w-10 h-10 ${domainInfo.color} rounded-full flex items-center justify-center text-white text-sm font-bold`}>
             {domainInfo.name}
           </div>
         </div>
@@ -61,8 +139,13 @@ function ArticlePreview({ url }: { url: string }) {
   );
 }
 
-// Oppdatert komponent for en artikel med scraped dato
-function ArticleWithSummary({ artikkel, index }: { artikkel: { lenke: string; scraped: string }; index: number }) {
+function ArticleWithSummary({
+  artikkel,
+  index
+}: {
+  artikkel: ArtikelDTO;
+  index: number;
+}) {
   const [sammendrag, setSammendrag] = useState<SammendragDTO | null>(null);
   const [showSammendrag, setShowSammendrag] = useState(false);
   const [isLoadingSammendrag, setIsLoadingSammendrag] = useState(false);
@@ -73,11 +156,9 @@ function ArticleWithSummary({ artikkel, index }: { artikkel: { lenke: string; sc
       setShowSammendrag(false);
       return;
     }
-
     if (!sammendrag && !isLoadingSammendrag) {
       setIsLoadingSammendrag(true);
       setSammendragError(null);
-      
       try {
         const result = await kvasirApi.getSammendrag(artikkel.lenke);
         setSammendrag(result);
@@ -92,96 +173,112 @@ function ArticleWithSummary({ artikkel, index }: { artikkel: { lenke: string; sc
     }
   };
 
-  // Formaterer scraped dato
   const formatScrapedDate = (dateString: string) => {
     try {
-      const date = new Date(dateString);
-      return date.toLocaleDateString('no-NO', {
-        day: '2-digit',
-        month: '2-digit',
-        year: 'numeric'
+      return new Date(dateString).toLocaleDateString('no-NO', {
+        day: '2-digit', month: '2-digit', year: 'numeric'
       });
     } catch {
       return dateString;
     }
   };
 
+  const sentimentAvailable = hasSentiment(artikkel);
+
   return (
-    <div className="space-y-2">
-      <div className="flex items-start gap-2 sm:gap-3 p-2 sm:p-3 bg-gray-50 dark:bg-gray-800 rounded-lg">
-        <span className="text-xs text-gray-500 mt-1 min-w-[16px] sm:min-w-[20px] flex-shrink-0">
-          {index + 1}.
+    <div>
+      <div className="kv-card p-3 sm:p-4 flex items-start gap-3">
+        <span className="text-xs text-gray-400 mt-1 min-w-[20px] flex-shrink-0 font-mono tabular-nums">
+          {String(index + 1).padStart(2, '0')}
         </span>
-        
-        {/* Preview bilde til venstre */}
+
         <ArticlePreview url={artikkel.lenke} />
-        
-        {/* Innhold og kontroller */}
-        <div className="flex-1 min-w-0 space-y-2">
-          {/* Artikkellenke */}
+
+        <div className="flex-1 min-w-0 space-y-3">
           <a
             href={artikkel.lenke}
             target="_blank"
             rel="noopener noreferrer"
-            className="text-xs sm:text-sm text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 hover:underline break-all block"
+            className="text-xs sm:text-sm text-blue-600 dark:text-blue-400 hover:underline break-all block leading-snug"
           >
             {artikkel.lenke}
           </a>
-          
-          {/* Scraped dato */}
-          <div className="text-xs flex items-center gap-2 mt-1">
+
+          <div className="flex flex-wrap items-center gap-2">
             <span
-              className="px-2 py-0.5 rounded-full bg-gradient-to-r from-blue-100 via-blue-50 to-blue-200 dark:from-blue-900/40 dark:via-blue-900/20 dark:to-blue-900/40 text-blue-800 dark:text-blue-200 font-semibold border border-blue-300 dark:border-blue-700 shadow-sm tracking-wide flex items-center gap-1"
-              title="Dato artikkelen ble hentet/skrapet"
+              className="kv-badge"
+              title="Dato artikkelen ble hentet"
             >
-              <svg className="w-3.5 h-3.5 mr-1 text-blue-400 dark:text-blue-300" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M8 7V3m8 4V3m-9 8h10m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M8 7V3m8 4V3m-9 8h10m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+              </svg>
               {formatScrapedDate(artikkel.scraped)}
             </span>
-          </div>
-          
-          {/* Sammendrag-knapp */}
-          <button
-            onClick={handleSammendragClick}
-            disabled={isLoadingSammendrag}
-            className="px-2 py-1 text-xs font-medium text-purple-600 dark:text-purple-400 bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-700 rounded hover:bg-purple-100 dark:hover:bg-purple-900/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {isLoadingSammendrag ? (
-              <span className="flex items-center gap-1">
-                <span className="animate-spin w-3 h-3 border border-purple-600 border-t-transparent rounded-full"></span>
-                Laster...
+
+            <button
+              onClick={handleSammendragClick}
+              disabled={isLoadingSammendrag}
+              className="kv-badge hover:brightness-110 transition cursor-pointer disabled:opacity-50"
+              style={{ background: 'rgba(168, 85, 247, 0.12)', color: '#7c3aed', borderColor: 'rgba(168, 85, 247, 0.25)' }}
+            >
+              {isLoadingSammendrag ? (
+                <>
+                  <span className="animate-spin w-3 h-3 border border-current border-t-transparent rounded-full" />
+                  Laster…
+                </>
+              ) : showSammendrag ? 'Skjul sammendrag' : 'Vis sammendrag'}
+            </button>
+
+            {!sentimentAvailable && (
+              <span className="kv-sentiment kv-sentiment-neutral" title="Sentiment er ikke analysert ennå">
+                Sentiment kommer
               </span>
-            ) : showSammendrag ? (
-              'Skjul sammendrag'
-            ) : (
-              'Vis sammendrag'
             )}
-          </button>
+          </div>
+
+          {sentimentAvailable && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-gray-100 dark:border-gray-800">
+              <SentimentRow
+                heading="Hvordan kandidaten omtaler"
+                help="Sentiment i setninger hvor kandidaten er objektet – altså hvordan andre omtaler personen."
+                label={artikkel.faarSentiment}
+                positive={artikkel.faarPositivScore}
+                negative={artikkel.faarNegativScore}
+              />
+              <SentimentRow
+                heading="Hvordan kandidaten omtaler annet"
+                help="Sentiment i setninger hvor kandidaten er subjektet – altså hvordan personen omtaler andre."
+                label={artikkel.girSentiment}
+                positive={artikkel.girPositivScore}
+                negative={artikkel.girNegativScore}
+              />
+            </div>
+          )}
         </div>
       </div>
-      
-      {/* Sammendrag-visning */}
+
       {showSammendrag && (
-        <div className="ml-6 sm:ml-8 p-3 sm:p-4 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg">
+        <div className="ml-0 sm:ml-10 mt-2 p-3 sm:p-4 kv-card">
           {sammendragError ? (
             <div className="text-red-600 dark:text-red-400 text-sm">
               <span className="font-medium">Feil:</span> {sammendragError}
             </div>
           ) : sammendrag ? (
             <div className="space-y-3">
-              <div className="flex flex-wrap items-center gap-2 sm:gap-4 text-xs font-medium">
-                <span className="px-2 py-1 rounded bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-200 border border-blue-200 dark:border-blue-700">
-                  Original: <span className="font-bold">{sammendrag.antallOrdOriginal}</span> ord
+              <div className="flex flex-wrap items-center gap-2 text-xs font-medium">
+                <span className="kv-badge">
+                  Original: {sammendrag.antallOrdOriginal} ord
                 </span>
-                <span className="px-2 py-1 rounded bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-200 border border-green-200 dark:border-green-700">
-                  Sammendrag: <span className="font-bold">{sammendrag.antallOrdSammendrag}</span> ord
+                <span className="kv-badge" style={{ background: 'rgba(16, 185, 129, 0.1)', color: '#059669', borderColor: 'rgba(16, 185, 129, 0.25)' }}>
+                  Sammendrag: {sammendrag.antallOrdSammendrag} ord
                 </span>
-                <span className="px-2 py-1 rounded bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-200 border border-purple-200 dark:border-purple-700">
-                  Kompresjon: <span className="font-bold">{(sammendrag.kompresjonRatio * 100).toFixed(1)}%</span>
+                <span className="kv-badge" style={{ background: 'rgba(168, 85, 247, 0.1)', color: '#7c3aed', borderColor: 'rgba(168, 85, 247, 0.25)' }}>
+                  Kompresjon: {(sammendrag.kompresjonRatio * 100).toFixed(1)}%
                 </span>
               </div>
-              <div className="text-sm text-gray-700 dark:text-gray-300 leading-relaxed">
+              <p className="text-sm text-gray-700 dark:text-gray-300 leading-relaxed">
                 {sammendrag.sammendrag}
-              </div>
+              </p>
             </div>
           ) : (
             <div className="text-gray-500 dark:text-gray-400 text-sm">
@@ -194,14 +291,12 @@ function ArticleWithSummary({ artikkel, index }: { artikkel: { lenke: string; sc
   );
 }
 
-// Ny komponent for datovelger
 function DateRangeSelector({ dateRange, onDateRangeChange, onResetDateFilter, setShowValidationWarning }: {
   dateRange: DateRange;
   onDateRangeChange: (dateRange: DateRange) => void;
   onResetDateFilter: () => void;
   setShowValidationWarning: (msg: string | null) => void;
 }) {
-  // Sett standard verdier til min/max
   const minimumDate = kvasirApi.getMinimumDate();
   const today = new Date();
 
@@ -216,30 +311,18 @@ function DateRangeSelector({ dateRange, onDateRangeChange, onResetDateFilter, se
     const todayOnly = new Date(today.getFullYear(), today.getMonth(), today.getDate());
 
     if (selectedDateOnly < minimumDateOnly) {
-      return { 
-        valid: false, 
-        message: `Kan ikke velge dato før ${kvasirApi.formatNorwegianDate(minimumDate)}. Dette er den tidligste datoen vi har data fra.`
-      };
+      return { valid: false, message: `Kan ikke velge dato før ${kvasirApi.formatNorwegianDate(minimumDate)}. Dette er den tidligste datoen vi har data fra.` };
     }
     if (selectedDateOnly > todayOnly) {
-      return { 
-        valid: false, 
-        message: `Kan ikke velge fremtidige datoer. Velg dagens dato eller tidligere.`
-      };
+      return { valid: false, message: `Kan ikke velge fremtidige datoer. Velg dagens dato eller tidligere.` };
     }
     return { valid: true };
   };
 
-  // Returnerer kun true/false for gyldig dato
-  const isValid = (selectedDate: Date) => isValidDate(selectedDate).valid;
-
   const handleFromDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.value) {
       setShowValidationWarning(null);
-      onDateRangeChange({
-        ...dateRange,
-        fraDato: null
-      });
+      onDateRangeChange({ ...dateRange, fraDato: null });
       return;
     }
     const selectedDate = new Date(e.target.value);
@@ -253,33 +336,14 @@ function DateRangeSelector({ dateRange, onDateRangeChange, onResetDateFilter, se
     }
     setShowValidationWarning(null);
     let newTilDato = dateRange.tilDato;
-    if (newTilDato && selectedDate > newTilDato) {
-      newTilDato = selectedDate;
-    }
-    onDateRangeChange({
-      fraDato: selectedDate,
-      tilDato: newTilDato
-    });
-  };
-
-  const handleFromDateBlur = (e: React.FocusEvent<HTMLInputElement>) => {
-    if (!e.target.value) return;
-    const selectedDate = new Date(e.target.value);
-    const validation = isValidDate(selectedDate);
-    if (!validation.valid) {
-      setShowValidationWarning(validation.message || 'Ugyldig dato');
-    } else {
-      setShowValidationWarning(null);
-    }
+    if (newTilDato && selectedDate > newTilDato) newTilDato = selectedDate;
+    onDateRangeChange({ fraDato: selectedDate, tilDato: newTilDato });
   };
 
   const handleToDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.value) {
       setShowValidationWarning(null);
-      onDateRangeChange({
-        ...dateRange,
-        tilDato: null
-      });
+      onDateRangeChange({ ...dateRange, tilDato: null });
       return;
     }
     const selectedDate = new Date(e.target.value);
@@ -293,130 +357,181 @@ function DateRangeSelector({ dateRange, onDateRangeChange, onResetDateFilter, se
     }
     setShowValidationWarning(null);
     let newFraDato = dateRange.fraDato;
-    if (newFraDato && selectedDate < newFraDato) {
-      newFraDato = selectedDate;
-    }
-    onDateRangeChange({
-      fraDato: newFraDato,
-      tilDato: selectedDate
-    });
-  };
-
-  const handleToDateBlur = (e: React.FocusEvent<HTMLInputElement>) => {
-    if (!e.target.value) return;
-    const selectedDate = new Date(e.target.value);
-    const validation = isValidDate(selectedDate);
-    if (!validation.valid) {
-      setShowValidationWarning(validation.message || 'Ugyldig dato');
-    } else {
-      setShowValidationWarning(null);
-    }
+    if (newFraDato && selectedDate < newFraDato) newFraDato = selectedDate;
+    onDateRangeChange({ fraDato: newFraDato, tilDato: selectedDate });
   };
 
   const hasActiveFilter = dateRange.fraDato || dateRange.tilDato;
 
   return (
-    <div className="bg-white dark:bg-gray-900 p-4 sm:p-6 rounded-lg border border-gray-200 dark:border-gray-700 mb-6 sm:mb-8">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <h3 className="text-base sm:text-lg font-semibold text-foreground">
-          Filtrer etter dato
-        </h3>
-        <div className="flex flex-col sm:flex-row gap-3 sm:gap-4 items-start sm:items-center">
-          <div className="flex flex-col sm:flex-row gap-2 sm:gap-3 items-start sm:items-center">
-            <div className="flex flex-col gap-1">
-              <label htmlFor="fraDato" className="text-xs font-medium text-gray-600 dark:text-gray-400">
-                Fra dato:
-              </label>
-              <input
-                id="fraDato"
-                type="date"
-                value={formatDateForInput(dateRange.fraDato)}
-                onChange={handleFromDateChange}
-                onBlur={handleFromDateBlur}
-                min={formatDateForInput(minimumDate)}
-                max={formatDateForInput(today)}
-                className="px-3 py-2 text-sm border border-blue-600 dark:border-blue-400 rounded-full bg-white dark:bg-gray-800 text-foreground focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent shadow-sm"
-              />
-              <span className="text-xs text-gray-500 dark:text-gray-400">
-                Fra {kvasirApi.formatNorwegianDate(minimumDate)}
-              </span>
-            </div>
-            <div className="flex flex-col gap-1">
-              <label htmlFor="tilDato" className="text-xs font-medium text-gray-600 dark:text-gray-400">
-                Til dato:
-              </label>
-              <input
-                id="tilDato"
-                type="date"
-                value={formatDateForInput(dateRange.tilDato)}
-                onChange={handleToDateChange}
-                onBlur={handleToDateBlur}
-                min={formatDateForInput(dateRange.fraDato || minimumDate)}
-                max={formatDateForInput(today)}
-                className="px-3 py-2 text-sm border border-blue-600 dark:border-blue-400 rounded-full bg-white dark:bg-gray-800 text-foreground focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent shadow-sm"
-              />
-              <span className="text-xs text-gray-500 dark:text-gray-400">
-                Til {kvasirApi.formatNorwegianDate(today)}
-              </span>
-            </div>
+    <div className="kv-card p-5 sm:p-6 mb-8 relative overflow-hidden">
+      <div
+        className="absolute inset-0 opacity-[0.06] pointer-events-none"
+        style={{ background: 'radial-gradient(600px 200px at 10% 0%, #4f46e5, transparent 60%)' }}
+      />
+      <div className="relative flex flex-col lg:flex-row lg:items-end gap-5">
+        <div className="flex-1 flex items-center gap-4">
+          <div className="kv-icon-badge kv-icon-badge-blue">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M8 7V3m8 4V3m-9 8h10m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+            </svg>
+          </div>
+          <div>
+            <h3 className="text-base font-bold tracking-tight">Tidsrom</h3>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+              Data fra <span className="font-medium text-foreground">{kvasirApi.formatNorwegianDate(minimumDate)}</span> til i dag
+            </p>
+          </div>
+        </div>
+
+        <div className="flex flex-col sm:flex-row gap-3 sm:items-end">
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="fraDato" className="text-[10px] uppercase tracking-[0.12em] font-bold text-gray-500 dark:text-gray-400">
+              Fra
+            </label>
+            <input
+              id="fraDato"
+              type="date"
+              value={formatDateForInput(dateRange.fraDato)}
+              onChange={handleFromDateChange}
+              min={formatDateForInput(minimumDate)}
+              max={formatDateForInput(today)}
+              className="px-3.5 py-2.5 text-sm font-medium border border-gray-200 dark:border-gray-700 rounded-xl bg-white/70 dark:bg-gray-900/70 backdrop-blur text-foreground focus:outline-none focus:ring-2 focus:ring-indigo-500/60 focus:border-indigo-400 shadow-sm hover:border-gray-300 dark:hover:border-gray-600 transition-colors"
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="tilDato" className="text-[10px] uppercase tracking-[0.12em] font-bold text-gray-500 dark:text-gray-400">
+              Til
+            </label>
+            <input
+              id="tilDato"
+              type="date"
+              value={formatDateForInput(dateRange.tilDato)}
+              onChange={handleToDateChange}
+              min={formatDateForInput(dateRange.fraDato || minimumDate)}
+              max={formatDateForInput(today)}
+              className="px-3.5 py-2.5 text-sm font-medium border border-gray-200 dark:border-gray-700 rounded-xl bg-white/70 dark:bg-gray-900/70 backdrop-blur text-foreground focus:outline-none focus:ring-2 focus:ring-indigo-500/60 focus:border-indigo-400 shadow-sm hover:border-gray-300 dark:hover:border-gray-600 transition-colors"
+            />
           </div>
           {hasActiveFilter && (
             <button
               onClick={onResetDateFilter}
-              className="px-3 py-2 text-xs sm:text-sm font-medium text-gray-600 dark:text-gray-400 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
+              className="px-4 py-2.5 text-xs font-semibold text-gray-600 dark:text-gray-300 bg-white/60 dark:bg-gray-800/60 backdrop-blur border border-gray-200 dark:border-gray-700 rounded-xl hover:bg-white dark:hover:bg-gray-800 hover:border-gray-300 dark:hover:border-gray-600 transition-all shadow-sm flex items-center gap-1.5"
             >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
               Tilbakestill
             </button>
           )}
         </div>
       </div>
-      {hasActiveFilter && (
-        <div className="mt-3 p-2 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-700 rounded text-sm">
-          <span className="text-blue-700 dark:text-blue-300">
-            {dateRange.fraDato && dateRange.tilDato ? (
-              <>Viser data fra {kvasirApi.formatNorwegianDate(dateRange.fraDato)} til {kvasirApi.formatNorwegianDate(dateRange.tilDato)}</>
-            ) : dateRange.fraDato ? (
-              <>Viser data fra {kvasirApi.formatNorwegianDate(dateRange.fraDato)} og fremover</>
-            ) : dateRange.tilDato ? (
-              <>Viser data til og med {kvasirApi.formatNorwegianDate(dateRange.tilDato)}</>
-            ) : null}
-          </span>
-        </div>
-      )}
     </div>
+  );
+}
+
+function StatCard({
+  title, value, hint, variant, icon
+}: {
+  title: string;
+  value: React.ReactNode;
+  hint?: string;
+  variant: "blue" | "green" | "purple" | "amber";
+  icon?: React.ReactNode;
+}) {
+  const variantCls = variant === "green" ? "kv-stat-green"
+    : variant === "purple" ? "kv-stat-purple"
+    : variant === "amber" ? "kv-stat-amber"
+    : "";
+  const gradTextCls = variant === "green" ? "kv-grad-text-emerald"
+    : variant === "purple" ? "kv-grad-text-purple"
+    : variant === "amber" ? "kv-grad-text-amber"
+    : "kv-grad-text";
+  const iconBadgeCls = variant === "green" ? "kv-icon-badge-emerald"
+    : variant === "purple" ? "kv-icon-badge-purple"
+    : variant === "amber" ? "kv-icon-badge-amber"
+    : "kv-icon-badge-blue";
+
+  return (
+    <div className={`kv-card kv-card-hover kv-stat ${variantCls} p-5 sm:p-6 animate-fade-in-up`}>
+      <div className="relative z-10 flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <h3 className="text-[11px] sm:text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-[0.14em] mb-3">
+            {title}
+          </h3>
+          <p className={`text-4xl sm:text-5xl font-extrabold ${gradTextCls} tabular-nums leading-none`}>
+            {value}
+          </p>
+          {hint && <p className="text-xs text-gray-500 dark:text-gray-400 mt-3 font-medium">{hint}</p>}
+        </div>
+        {icon && (
+          <div className={`kv-icon-badge ${iconBadgeCls} flex-shrink-0`}>
+            {icon}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CandidateSentimentSummary({ person }: { person: Person }) {
+  const { avg, count } = aggregateFaarScore(person);
+  if (count === 0) {
+    return (
+      <span className="kv-sentiment kv-sentiment-neutral">
+        Sentiment kommer
+      </span>
+    );
+  }
+  const pct = Math.max(-100, Math.min(100, avg * 100));
+  const tone = pct > 20 ? "positive" : pct < -20 ? "negative" : "neutral";
+  const cls = tone === "positive" ? "kv-sentiment kv-sentiment-positive"
+    : tone === "negative" ? "kv-sentiment kv-sentiment-negative"
+    : "kv-sentiment kv-sentiment-neutral";
+  const text = tone === "positive" ? "Positiv" : tone === "negative" ? "Negativ" : "Nøytral";
+  return (
+    <span className={cls} title={`Gjennomsnittlig sentiment på tvers av ${count} analyserte artikler`}>
+      <span aria-hidden>{tone === "positive" ? "▲" : tone === "negative" ? "▼" : "■"}</span>
+      {text} · {pct > 0 ? "+" : ""}{pct.toFixed(0)}
+    </span>
   );
 }
 
 export default function DataDisplay({ data, isLoading, error, dateRange, onDateRangeChange, onResetDateFilter }: DataDisplayProps) {
   const [showAllCandidates, setShowAllCandidates] = useState(false);
   const [expandedCandidate, setExpandedCandidate] = useState<string | null>(null);
+  const [showAllArticles, setShowAllArticles] = useState(false);
   const [showValidationWarning, setShowValidationWarning] = useState<string | null>(null);
 
-  // Sett default datoperiode på første last hvis ikke satt
-  React.useEffect(() => {
+  useEffect(() => {
     if (!dateRange.fraDato && !dateRange.tilDato) {
       const minimumDate = kvasirApi.getMinimumDate();
       const today = new Date();
-      onDateRangeChange({
-        fraDato: minimumDate,
-        tilDato: today
-      });
+      onDateRangeChange({ fraDato: minimumDate, tilDato: today });
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   if (isLoading) {
     return (
       <div className="py-6 sm:py-8">
-        <div className="animate-pulse">
-          <div className="h-6 sm:h-8 bg-gray-200 dark:bg-gray-700 rounded w-48 sm:w-64 mb-4 sm:mb-6"></div>
+        <div className="space-y-6">
+          <div className="h-8 w-64 animate-shimmer rounded" />
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6">
-            {[...Array(6)].map((_, i) => (
-              <div key={i} className="bg-white dark:bg-gray-900 p-4 sm:p-6 rounded-lg border border-gray-200 dark:border-gray-700">
-                <div className="h-4 sm:h-6 bg-gray-200 dark:bg-gray-700 rounded w-24 sm:w-32 mb-3 sm:mb-4"></div>
-                <div className="h-6 sm:h-8 bg-gray-200 dark:bg-gray-700 rounded w-12 sm:w-16 mb-2"></div>
-                <div className="h-3 sm:h-4 bg-gray-200 dark:bg-gray-700 rounded w-16 sm:w-24"></div>
+            {[...Array(3)].map((_, i) => (
+              <div key={i} className="kv-card p-6">
+                <div className="h-4 w-24 animate-shimmer rounded mb-3" />
+                <div className="h-8 w-16 animate-shimmer rounded" />
               </div>
             ))}
+          </div>
+          <div className="kv-card p-6">
+            <div className="h-5 w-48 animate-shimmer rounded mb-4" />
+            <div className="space-y-3">
+              {[...Array(5)].map((_, i) => (
+                <div key={i} className="h-6 w-full animate-shimmer rounded" />
+              ))}
+            </div>
           </div>
         </div>
       </div>
@@ -426,18 +541,12 @@ export default function DataDisplay({ data, isLoading, error, dateRange, onDateR
   if (error) {
     return (
       <div className="py-6 sm:py-8">
-        <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4 sm:p-6">
+        <div className="kv-card p-5 sm:p-6 border-red-200 dark:border-red-900" style={{ background: 'rgba(239, 68, 68, 0.05)' }}>
           <div className="flex items-start gap-3">
-            <div className="w-6 h-6 sm:w-8 sm:h-8 bg-red-500 rounded-full flex items-center justify-center flex-shrink-0">
-              <span className="text-white text-sm font-bold">!</span>
-            </div>
+            <div className="w-8 h-8 bg-red-500 rounded-full flex items-center justify-center flex-shrink-0 text-white font-bold">!</div>
             <div className="min-w-0">
-              <h3 className="text-red-800 dark:text-red-200 font-semibold text-sm sm:text-base">
-                Kunne ikke laste data
-              </h3>
-              <p className="text-red-600 dark:text-red-300 text-sm mt-1 break-words">
-                {error}
-              </p>
+              <h3 className="text-red-800 dark:text-red-300 font-semibold">Kunne ikke laste data</h3>
+              <p className="text-red-700 dark:text-red-400 text-sm mt-1 break-words">{error}</p>
             </div>
           </div>
         </div>
@@ -445,20 +554,17 @@ export default function DataDisplay({ data, isLoading, error, dateRange, onDateR
     );
   }
 
-  if (!data) {
-    return null;
-  }
+  if (!data) return null;
 
   const allePartier = Object.entries(data.partiProsentFordeling)
     .sort(([, a], [, b]) => (b as number) - (a as number));
 
-  const sortedPersoner = data.allePersonernevnt
-    .sort((a, b) => b.antallArtikler - a.antallArtikler);
-
+  const sortedPersoner = [...data.allePersonernevnt].sort((a, b) => b.antallArtikler - a.antallArtikler);
   const displayedPersoner = showAllCandidates ? sortedPersoner : sortedPersoner.slice(0, 10);
 
   const toggleExpandCandidate = (candidateName: string) => {
     setExpandedCandidate(expandedCandidate === candidateName ? null : candidateName);
+    setShowAllArticles(false);
   };
 
   const getSourceDisplayName = (kilde: string) => {
@@ -472,14 +578,21 @@ export default function DataDisplay({ data, isLoading, error, dateRange, onDateR
     }
   };
 
+  // Antall artikler med faktisk sentiment-analyse
+  const sentimentAnalysedCount = data.allePersonernevnt.reduce(
+    (acc, p) => acc + p.lenker.filter(hasSentiment).length, 0
+  );
+  const sentimentCoverage = data.totaltAntallArtikler > 0
+    ? (sentimentAnalysedCount / data.totaltAntallArtikler) * 100
+    : 0;
+
   return (
     <div className="py-6 sm:py-8 max-w-none xl:max-w-7xl 2xl:max-w-none">
-      {/* Alert slide-down fra toppen */}
       {showValidationWarning && (
         <div className="fixed top-0 left-0 w-full z-50 flex justify-center animate-slideDown">
-          <div className="mt-4 px-6 py-3 bg-red-600 text-white rounded shadow-lg flex items-center gap-2 border border-red-800">
-            <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z"/>
+          <div className="mt-4 px-6 py-3 bg-red-600 text-white rounded-lg shadow-lg flex items-center gap-2 border border-red-800">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
             </svg>
             <span className="text-base font-medium">{showValidationWarning}</span>
             <button onClick={() => setShowValidationWarning(null)} className="ml-4 text-white hover:text-red-200 text-lg font-bold">×</button>
@@ -487,31 +600,39 @@ export default function DataDisplay({ data, isLoading, error, dateRange, onDateR
         </div>
       )}
 
-      {/* Dynamisk overskrift */}
-      <div className="mb-6 sm:mb-8">
-        <h1 className="text-2xl sm:text-3xl lg:text-4xl font-bold text-foreground mb-2">
-          {getSourceDisplayName(data.kilde)} - Kandidatanalyse
-        </h1>
-        <p className="text-sm sm:text-base text-gray-600 dark:text-gray-300">
-          Analyse av {data.totaltAntallArtikler} artikler med {data.allePersonernevnt.length} unike kandidater
-        </p>
-        {/* Dato badge under overskriften */}
-        {(dateRange.fraDato || dateRange.tilDato) && (
-          <div className="mt-3 flex flex-wrap gap-2">
-            <span className="inline-block px-3 py-1 rounded-full bg-blue-600 text-white dark:bg-blue-400 dark:text-blue-900 text-xs font-semibold border border-blue-700 dark:border-blue-200 shadow">
+      {/* Header */}
+      <div className="mb-10 animate-fade-in-up">
+        <div className="flex flex-wrap items-center gap-2 mb-4">
+          <span className="kv-badge kv-badge-gradient kv-animated-grad">
+            <span className="kv-live-dot" /> {getSourceDisplayName(data.kilde)}
+          </span>
+          {(dateRange.fraDato || dateRange.tilDato) && (
+            <span className="kv-badge">
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M8 7V3m8 4V3m-9 8h10m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+              </svg>
               {dateRange.fraDato && dateRange.tilDato
-                ? `Periode: ${kvasirApi.formatNorwegianDate(dateRange.fraDato)} - ${kvasirApi.formatNorwegianDate(dateRange.tilDato)}`
+                ? `${kvasirApi.formatNorwegianDate(dateRange.fraDato)} – ${kvasirApi.formatNorwegianDate(dateRange.tilDato)}`
                 : dateRange.fraDato
-                ? `Fra: ${kvasirApi.formatNorwegianDate(dateRange.fraDato)}`
+                ? `Fra ${kvasirApi.formatNorwegianDate(dateRange.fraDato)}`
                 : dateRange.tilDato
-                ? `Til: ${kvasirApi.formatNorwegianDate(dateRange.tilDato)}`
+                ? `Til ${kvasirApi.formatNorwegianDate(dateRange.tilDato)}`
                 : null}
             </span>
-          </div>
-        )}
+          )}
+        </div>
+        <h1 className="text-4xl sm:text-5xl lg:text-6xl font-extrabold mb-3 tracking-tight leading-[1.05]">
+          <span className="kv-grad-text kv-animated-grad">Kandidatanalyse</span>
+        </h1>
+        <p className="text-base sm:text-lg text-gray-600 dark:text-gray-300 max-w-2xl">
+          <span className="font-semibold text-foreground tabular-nums">{data.totaltAntallArtikler.toLocaleString('no-NO')}</span> artikler ·
+          <span className="font-semibold text-foreground tabular-nums"> {data.allePersonernevnt.length.toLocaleString('no-NO')}</span> unike kandidater
+          {sentimentAnalysedCount > 0 && (
+            <> · <span className="kv-grad-text-emerald font-semibold">{sentimentCoverage.toFixed(0)}% sentiment-analysert</span></>
+          )}
+        </p>
       </div>
 
-      {/* Datovelger under overskriften */}
       <DateRangeSelector
         dateRange={dateRange}
         onDateRangeChange={onDateRangeChange}
@@ -520,139 +641,243 @@ export default function DataDisplay({ data, isLoading, error, dateRange, onDateR
       />
 
       {/* Hovedstatistikk */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 sm:gap-6 mb-6 sm:mb-8">
-        <div className="bg-white dark:bg-gray-900 p-4 sm:p-6 rounded-lg border border-gray-200 dark:border-gray-700">
-          <h3 className="text-base sm:text-lg font-semibold mb-2">Totalt antall artikler</h3>
-          <p className="text-2xl sm:text-3xl font-bold text-blue-600">{data.totaltAntallArtikler}</p>
-        </div>
-        <div className="bg-white dark:bg-gray-900 p-4 sm:p-6 rounded-lg border border-gray-200 dark:border-gray-700">
-          <h3 className="text-base sm:text-lg font-semibold mb-2">Unike kandidater</h3>
-          <p className="text-2xl sm:text-3xl font-bold text-green-600">{data.allePersonernevnt.length}</p>
-        </div>
-        <div className="bg-white dark:bg-gray-900 p-4 sm:p-6 rounded-lg border border-gray-200 dark:border-gray-700 sm:col-span-2 xl:col-span-1">
-          <h3 className="text-base sm:text-lg font-semibold mb-2">Gj.snitt alder</h3>
-          <p className="text-2xl sm:text-3xl font-bold text-purple-600">
-            {data.gjennomsnittligAlder.toFixed(1)} år
-          </p>
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 sm:gap-5 mb-10">
+        <StatCard
+          title="Totalt artikler"
+          value={data.totaltAntallArtikler.toLocaleString('no-NO')}
+          variant="blue"
+          icon={
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19 20H5a2 2 0 01-2-2V6a2 2 0 012-2h10a2 2 0 012 2v1m2 13a2 2 0 01-2-2V7m2 13a2 2 0 002-2V9a2 2 0 00-2-2h-2m-4-3H9M7 16h6M7 8h6v4H7V8z" />
+            </svg>
+          }
+        />
+        <StatCard
+          title="Unike kandidater"
+          value={data.allePersonernevnt.length.toLocaleString('no-NO')}
+          variant="green"
+          icon={
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+            </svg>
+          }
+        />
+        <StatCard
+          title="Gj.snitt alder"
+          value={`${data.gjennomsnittligAlder.toFixed(1)}`}
+          hint="år"
+          variant="purple"
+          icon={
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          }
+        />
+      </div>
+
+      {/* Kjønn + Parti side-om-side på større skjermer */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-10">
+        {Object.keys(data.kjoennProsentFordeling).length > 0 && (
+          <div className="kv-card kv-card-hover p-5 sm:p-6 animate-fade-in-up">
+            <div className="flex items-center gap-3 mb-5">
+              <div className="kv-icon-badge kv-icon-badge-blue">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                </svg>
+              </div>
+              <h3 className="text-lg font-bold tracking-tight">Kjønnsfordeling</h3>
+            </div>
+            <div className="space-y-4">
+              {Object.entries(data.kjoennProsentFordeling).map(([kjonn, prosent]) => (
+                <div key={kjonn} className="flex items-center justify-between gap-3">
+                  <span className="capitalize text-sm font-semibold min-w-[64px]">{kjonn}</span>
+                  <div className="flex items-center gap-3 flex-1 max-w-xs">
+                    <div className="kv-bar-track flex-1">
+                      <div className="kv-bar-fill kv-bar-fill-blue" style={{ width: `${prosent}%` }} />
+                    </div>
+                    <span className="text-sm font-bold tabular-nums min-w-[52px] text-right">
+                      {prosent.toFixed(1)}%
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="kv-card kv-card-hover p-5 sm:p-6 animate-fade-in-up">
+          <div className="flex items-center gap-3 mb-5">
+            <div className="kv-icon-badge kv-icon-badge-emerald">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M3 3v18h18M7 15l4-4 4 4 5-5" />
+              </svg>
+            </div>
+            <h3 className="text-lg font-bold tracking-tight">Partifordeling</h3>
+            <span className="ml-auto text-[10px] uppercase tracking-wider font-bold text-gray-400 dark:text-gray-500">
+              {allePartier.length} partier
+            </span>
+          </div>
+          <div className="space-y-3.5 max-h-[420px] overflow-y-auto sidebar-scrollbar pr-1">
+            {allePartier.map(([parti, prosent]) => {
+              const antallGanger = data.partiMentions[parti] || 0;
+              return (
+                <div key={parti} className="flex items-center justify-between gap-3">
+                  <span className="text-sm font-semibold truncate flex-1" title={parti}>{parti}</span>
+                  <div className="flex items-center gap-3 flex-1 max-w-[240px]">
+                    <div className="kv-bar-track flex-1">
+                      <div className="kv-bar-fill kv-bar-fill-emerald" style={{ width: `${prosent}%` }} />
+                    </div>
+                    <span className="text-xs font-bold tabular-nums min-w-[76px] text-right">
+                      {prosent.toFixed(1)}% <span className="text-gray-400 font-medium">({antallGanger})</span>
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       </div>
 
-      {/* Kjønnsfordeling */}
-      {Object.keys(data.kjoennProsentFordeling).length > 0 && (
-        <div className="bg-white dark:bg-gray-900 p-4 sm:p-6 rounded-lg border border-gray-200 dark:border-gray-700 mb-6 sm:mb-8">
-          <h3 className="text-base sm:text-lg font-semibold mb-4">Kjønnsfordeling</h3>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            {Object.entries(data.kjoennProsentFordeling).map(([kjonn, prosent]) => (
-              <div key={kjonn} className="flex items-center justify-between">
-                <span className="capitalize text-sm sm:text-base">{kjonn}</span>
-                <div className="flex items-center gap-2">
-                  <div className="w-20 sm:w-24 h-3 sm:h-4 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
-                    <div 
-                      className="h-full bg-blue-500 rounded-full transition-all duration-500"
-                      style={{ width: `${prosent}%` }}
-                    />
-                  </div>
-                  <span className="text-xs sm:text-sm font-medium w-10 sm:w-12 text-right">
-                    {prosent.toFixed(1)}%
-                  </span>
-                </div>
-              </div>
-            ))}
+      {/* Kandidater */}
+      <div className="kv-card p-5 sm:p-6 animate-fade-in-up">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6">
+          <div className="flex items-center gap-3">
+            <div className="kv-icon-badge kv-icon-badge-purple">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.196-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.783-.57-.38-1.81.588-1.81h4.915a1 1 0 00.95-.69l1.519-4.674z" />
+              </svg>
+            </div>
+            <div>
+              <h3 className="text-lg sm:text-xl font-bold tracking-tight">
+                {showAllCandidates
+                  ? `Alle kandidater`
+                  : 'Top 10 mest omtalte'}
+              </h3>
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                {showAllCandidates
+                  ? `${data.allePersonernevnt.length} kandidater totalt`
+                  : `Av totalt ${data.allePersonernevnt.length} kandidater`}
+              </p>
+            </div>
           </div>
+          <button
+            onClick={() => setShowAllCandidates(!showAllCandidates)}
+            className="px-4 py-2.5 text-sm font-semibold text-white rounded-xl transition-all w-fit shadow-md hover:shadow-lg hover:-translate-y-0.5 flex items-center gap-2"
+            style={{ background: 'linear-gradient(135deg, #4f46e5, #7c3aed)' }}
+          >
+            {showAllCandidates ? (
+              <>
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 15l7-7 7 7" />
+                </svg>
+                Vis bare top 10
+              </>
+            ) : (
+              <>
+                Se alle {data.allePersonernevnt.length}
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M17 8l4 4m0 0l-4 4m4-4H3" />
+                </svg>
+              </>
+            )}
+          </button>
         </div>
-      )}
 
-      {/* Alle parti */}
-      <div className="bg-white dark:bg-gray-900 p-4 sm:p-6 rounded-lg border border-gray-200 dark:border-gray-700 mb-6 sm:mb-8">
-        <h3 className="text-base sm:text-lg font-semibold mb-4">Partifordeling (artikkelomtaler)</h3>
-        <div className="space-y-3">
-          {allePartier.map(([parti, prosent]) => {
-            const antallGanger = data.partiMentions[parti] || 0;
+        <div className="space-y-2.5">
+          {displayedPersoner.map((person, index) => {
+            const isExpanded = expandedCandidate === person.navn;
+            // Sorter artikler kronologisk — nyeste først
+            const sortedLenker = person.lenker
+              ? [...person.lenker].sort((a, b) => {
+                  const da = new Date(a.scraped).getTime();
+                  const db = new Date(b.scraped).getTime();
+                  return db - da;
+                })
+              : [];
             return (
-              <div key={parti} className="flex items-center justify-between gap-3">
-                <span className="font-medium text-sm sm:text-base truncate flex-shrink-0 min-w-0">{parti}</span>
-                <div className="flex items-center gap-2 flex-shrink-0">
-                  <div className="w-20 sm:w-32 h-3 sm:h-4 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
-                    <div 
-                      className="h-full bg-green-500 rounded-full transition-all duration-500"
-                      style={{ width: `${prosent}%` }}
-                    />
+              <div
+                key={person.navn}
+                className={`kv-card kv-card-hover overflow-hidden ${isExpanded ? 'ring-2 ring-indigo-400/40 dark:ring-indigo-500/40' : ''}`}
+              >
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => toggleExpandCandidate(person.navn)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') toggleExpandCandidate(person.navn); }}
+                  className="flex items-center gap-3 sm:gap-4 p-3.5 sm:p-4 cursor-pointer hover:bg-gradient-to-r hover:from-indigo-50/50 hover:to-transparent dark:hover:from-indigo-900/10 dark:hover:to-transparent transition-all"
+                >
+                  <div className={`kv-rank ${index < 3 ? 'kv-rank-top' : 'kv-rank-default'}`}>
+                    {index + 1}
                   </div>
-                  <span className="text-xs sm:text-sm font-medium w-16 sm:w-20 text-right">
-                    {prosent.toFixed(1)}% ({antallGanger})
-                  </span>
+                  <div className="flex-1 min-w-0">
+                    <h4 className="font-bold text-sm sm:text-base truncate tracking-tight">{person.navn}</h4>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 truncate mt-0.5">
+                      {person.parti} · {person.valgdistrikt}
+                      {person.alder ? ` · ${person.alder} år` : ''}
+                      {person.kjoenn ? ` · ${person.kjoenn}` : ''}
+                    </p>
+                  </div>
+                  <div className="hidden sm:block">
+                    <CandidateSentimentSummary person={person} />
+                  </div>
+                  <div className="text-right flex-shrink-0 min-w-[60px]">
+                    <p className="font-extrabold kv-grad-text tabular-nums text-xl leading-none">
+                      {person.antallArtikler}
+                    </p>
+                    <p className="text-[10px] uppercase tracking-wider text-gray-400 mt-1 font-bold">artikler</p>
+                  </div>
+                  <svg
+                    className={`w-4 h-4 text-gray-400 transition-transform flex-shrink-0 ${isExpanded ? 'rotate-180' : ''}`}
+                    fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                  </svg>
                 </div>
+
+                {isExpanded && sortedLenker.length > 0 && (
+                  <div className="p-4 sm:p-5 border-t border-gray-200 dark:border-gray-800 bg-gradient-to-b from-gray-50/60 to-transparent dark:from-gray-900/60 dark:to-transparent">
+                    <div className="flex items-center justify-between mb-4">
+                      <div className="flex items-center gap-2">
+                        <h5 className="text-sm font-bold text-gray-700 dark:text-gray-200 tracking-tight">
+                          Artikler
+                        </h5>
+                        <span className="kv-badge">{sortedLenker.length}</span>
+                        <span className="text-[10px] uppercase tracking-wider font-bold text-gray-400 dark:text-gray-500">
+                          Nyeste først
+                        </span>
+                      </div>
+                      <div className="sm:hidden">
+                        <CandidateSentimentSummary person={person} />
+                      </div>
+                    </div>
+                    <div className="space-y-3 max-h-[520px] overflow-y-auto sidebar-scrollbar pr-1">
+                      {(showAllArticles ? sortedLenker : sortedLenker.slice(0, 20)).map((artikkel, linkIndex) => (
+                        <ArticleWithSummary
+                          key={artikkel.lenke + linkIndex}
+                          artikkel={artikkel}
+                          index={linkIndex}
+                        />
+                      ))}
+                      {!showAllArticles && sortedLenker.length > 20 && (
+                        <button
+                          onClick={() => setShowAllArticles(true)}
+                          className="w-full py-2.5 text-sm font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-200 dark:border-indigo-800 rounded-xl hover:bg-indigo-100 dark:hover:bg-indigo-900/30 transition-colors"
+                        >
+                          Vis alle {sortedLenker.length} artikler
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })}
         </div>
-      </div>
 
-      {/* Kandidater med toggle knapp */}
-      <div className="bg-white dark:bg-gray-900 p-4 sm:p-6 rounded-lg border border-gray-200 dark:border-gray-700">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
-          <h3 className="text-base sm:text-lg font-semibold">
-            {showAllCandidates ? `Alle ${data.allePersonernevnt.length} kandidater` : 'Top 10 mest omtalte kandidater'}
-          </h3>
-          <button
-            onClick={() => setShowAllCandidates(!showAllCandidates)}
-            className="px-3 sm:px-4 py-2 text-xs sm:text-sm font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-700 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-900/30 transition-colors w-fit"
-          >
-            {showAllCandidates ? 'Vis bare top 10' : 'Se alle'}
-          </button>
-        </div>
-        
-        <div className="space-y-3 sm:space-y-4">
-          {displayedPersoner.map((person, index) => (
-            <div key={person.navn} className="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
-              <div 
-                className="flex items-center gap-3 sm:gap-4 p-3 sm:p-4 bg-gray-50 dark:bg-gray-800 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-                onClick={() => toggleExpandCandidate(person.navn)}
-              >
-                <div className="w-6 h-6 sm:w-8 sm:h-8 bg-blue-500 rounded-full flex items-center justify-center text-white font-bold text-xs sm:text-sm flex-shrink-0">
-                  {showAllCandidates ? index + 1 : index + 1}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <h4 className="font-medium text-sm sm:text-base truncate">{person.navn}</h4>
-                  <p className="text-xs sm:text-sm text-gray-600 dark:text-gray-400 truncate">
-                    {person.parti} • {person.valgdistrikt}
-                    {person.alder && ` • ${person.alder} år`}
-                    {person.kjoenn && ` • ${person.kjoenn}`}
-                  </p>
-                </div>
-                <div className="text-right mr-2 sm:mr-4 flex-shrink-0">
-                  <p className="font-bold text-blue-600 text-sm sm:text-base">{person.antallArtikler}</p>
-                  <p className="text-xs text-gray-500">artikler</p>
-                </div>
-                <div className="text-gray-400 flex-shrink-0">
-                  {expandedCandidate === person.navn ? '▲' : '▼'}
-                </div>
-              </div>
-              
-              {expandedCandidate === person.navn && person.lenker && person.lenker.length > 0 && (
-                <div className="p-3 sm:p-4 bg-white dark:bg-gray-900 border-t border-gray-200 dark:border-gray-700">
-                  <h5 className="font-medium mb-3 text-gray-700 dark:text-gray-300 text-sm sm:text-base">
-                    Artikkellenker ({person.lenker.length}):
-                  </h5>
-                  <div className="space-y-3 max-h-64 sm:max-h-96 overflow-y-auto">
-                    {person.lenker.map((artikkel, linkIndex) => (
-                      <ArticleWithSummary 
-                        key={linkIndex} 
-                        artikkel={artikkel}
-                        index={linkIndex} 
-                      />
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-        
         {showAllCandidates && data.allePersonernevnt.length > 10 && (
-          <div className="mt-4 text-center text-xs sm:text-sm text-gray-600 dark:text-gray-400">
-            Viser alle {data.allePersonernevnt.length} kandidater
-          </div>
+          <p className="mt-5 text-center text-xs text-gray-500 dark:text-gray-400">
+            Viser alle <span className="font-bold text-foreground">{data.allePersonernevnt.length}</span> kandidater
+          </p>
         )}
       </div>
     </div>

@@ -1,8 +1,18 @@
 // API Types basert på Java DTOs
 
+export type SentimentLabel = 'POSITIV' | 'NEGATIV' | 'NOYTRAL';
+
 export interface ArtikelDTO {
   lenke: string;
   scraped: string; // ISO date string fra backend (LocalDate)
+  // Sentiment: hvordan politikeren omtaler andre ("gir")
+  girSentiment: SentimentLabel | null;
+  girPositivScore: number | null;
+  girNegativScore: number | null;
+  // Sentiment: hvordan politikeren blir omtalt av andre ("får")
+  faarSentiment: SentimentLabel | null;
+  faarPositivScore: number | null;
+  faarNegativScore: number | null;
 }
 
 export interface Person {
@@ -11,7 +21,7 @@ export interface Person {
   kjoenn: string | null;
   parti: string;
   valgdistrikt: string;
-  lenker: ArtikelDTO[]; // Oppdatert til å matche backend
+  lenker: ArtikelDTO[];
   antallArtikler: number;
 }
 
@@ -33,6 +43,16 @@ export interface SammendragDTO {
   kompresjonRatio: number;
   antallOrdOriginal: number;
   antallOrdSammendrag: number;
+}
+
+export interface PersonSentimentDTO {
+  personNavn: string;
+  girSentiment: SentimentLabel | null;
+  girPositivScore: number | null;
+  girNegativScore: number | null;
+  faarSentiment: SentimentLabel | null;
+  faarPositivScore: number | null;
+  faarNegativScore: number | null;
 }
 
 export type ApiKilde = 'vg' | 'nrk' | 'e24' | 'dagbladet' | 'alt';

@@ -1,4 +1,4 @@
-import { DataDTO, ApiKilde, SammendragDTO, AnalyseRequestParams } from '@/types/api';
+import { DataDTO, ApiKilde, SammendragDTO, PersonSentimentDTO } from '@/types/api';
 
 const API_BASE_URL = 'https://api.kvasirsbrygg.no';
 
@@ -84,6 +84,25 @@ class KvasirApiService {
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) {
         return null;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Henter sentiment (GIR/FAAR) for alle politikere nevnt i en gitt artikkel.
+   * @param link URL til artikkelen
+   * @returns Liste av PersonSentimentDTO, eller tom liste hvis ingenting finnes
+   */
+  async getArtikelSentiment(link: string): Promise<PersonSentimentDTO[]> {
+    try {
+      const encodedLink = encodeURIComponent(link);
+      return await this.fetchApi<PersonSentimentDTO[]>(
+        `/api/artikkel/sentiment?link=${encodedLink}`
+      );
+    } catch (error) {
+      if (error instanceof Error && 'status' in error && (error as { status: number }).status === 404) {
+        return [];
       }
       throw error;
     }

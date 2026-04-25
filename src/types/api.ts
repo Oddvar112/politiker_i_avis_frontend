@@ -8,10 +8,12 @@ export interface ArtikelDTO {
   // Sentiment: hvordan politikeren omtaler andre ("gir")
   girSentiment: SentimentLabel | null;
   girPositivScore: number | null;
+  girNoytralScore: number | null;
   girNegativScore: number | null;
   // Sentiment: hvordan politikeren blir omtalt av andre ("får")
   faarSentiment: SentimentLabel | null;
   faarPositivScore: number | null;
+  faarNoytralScore: number | null;
   faarNegativScore: number | null;
 }
 
@@ -49,9 +51,11 @@ export interface PersonSentimentDTO {
   personNavn: string;
   girSentiment: SentimentLabel | null;
   girPositivScore: number | null;
+  girNoytralScore: number | null;
   girNegativScore: number | null;
   faarSentiment: SentimentLabel | null;
   faarPositivScore: number | null;
+  faarNoytralScore: number | null;
   faarNegativScore: number | null;
 }
 

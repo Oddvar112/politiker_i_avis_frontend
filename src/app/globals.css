@@ -216,6 +216,10 @@ body {
   background: linear-gradient(90deg, #ef4444, #dc2626);
   box-shadow: 0 0 10px rgba(239, 68, 68, 0.5);
 }
+.kv-sentiment-bar-neutral {
+  background: linear-gradient(90deg, #cbd5e1, #94a3b8);
+  box-shadow: 0 0 10px rgba(148, 163, 184, 0.4);
+}
 
 /* === Badge base === */
 .kv-badge {

@@ -13,14 +13,12 @@ interface DataDisplayProps {
 }
 
 // === Sentiment-hjelpere ===
+//
+// Bakenden lagrer nå alle tre konfidensene fra modellen (negativ, nøytral,
+// positiv). Frontenden speiler den logikken eksakt: argmax over de tre tallene
+// avgjør label, både per artikkel og som kandidat-snitt. Ingen egne terskler.
 
-/**
- * Terskel (på 0-1-skalaen) for forskjellen mellom positiv og negativ konfidens
- * før vi kaller det noe annet enn nøytral. Tilsvarer ±20 på pct-skalaen som
- * brukes i kandidat-pillen — så artikkel-pille og kandidat-pille bruker
- * eksakt samme logikk og kan ikke være uenige.
- */
-const FRONTEND_NEUTRAL_THRESHOLD = 0.20;
+type SentimentVec = { neg: number; neutral: number; pos: number };
 
 function sentimentMeta(label: SentimentLabel | null | undefined) {
   switch (label) {
@@ -36,19 +34,23 @@ function sentimentMeta(label: SentimentLabel | null | undefined) {
 }
 
 /**
- * Klassifiser sentiment ut fra (positiv, negativ)-scorer ved å bruke samme
- * regel som kandidat-snittet: |pos − neg| ≤ terskel → NOYTRAL, ellers vinner
- * den største. Overstyrer backend-labelen (som bruker max < 0.6 og av og til
- * gir andre svar enn frontend-snittet).
+ * Argmax over (negativ, nøytral, positiv) — eksakt samme regel som
+ * `SentimentScore.sentiment()` på backend-siden. Hvis alle tre mangler
+ * returneres null.
  */
-function computeSentimentFromScores(
+function pickLabel(v: SentimentVec | null): SentimentLabel | null {
+  if (v === null) return null;
+  if (v.neutral >= v.neg && v.neutral >= v.pos) return "NOYTRAL";
+  return v.pos > v.neg ? "POSITIV" : "NEGATIV";
+}
+
+function vecFromScores(
   positive: number | null,
+  neutral: number | null,
   negative: number | null
-): SentimentLabel | null {
-  if (positive === null || negative === null) return null;
-  const diff = positive - negative;
-  if (Math.abs(diff) <= FRONTEND_NEUTRAL_THRESHOLD) return "NOYTRAL";
-  return diff > 0 ? "POSITIV" : "NEGATIV";
+): SentimentVec | null {
+  if (positive === null || neutral === null || negative === null) return null;
+  return { neg: negative, neutral, pos: positive };
 }
 
 function hasSentiment(a: ArtikelDTO): boolean {
@@ -56,27 +58,41 @@ function hasSentiment(a: ArtikelDTO): boolean {
 }
 
 /**
- * Beregner aggregert sentiment-score (-1 til 1) per person.
- * `kind = 'faar'` = hvordan kandidaten omtales av andre.
- * `kind = 'gir'` = hvordan kandidaten omtaler andre.
- *
- * Tar med ALLE artikler som har scorer (også de backenden labelet NOYTRAL)
- * — frontenden bruker sin egen ±20-terskel både her og på artikkel-pillen,
- * så de er garantert konsistente.
+ * Snittet av konfidensvektoren over alle artikler som har sentiment-scorer
+ * for den aktuelle dimensjonen ('faar' = omtalt av andre, 'gir' = sier om
+ * andre). Argmax over snittvektoren gir kandidatens samlede label — samme
+ * regel som per-artikkel-pillen, så de kan ikke være uenige.
  */
-function aggregateScore(person: Person, kind: 'faar' | 'gir'): { avg: number; count: number } {
+function aggregateScores(
+  person: Person,
+  kind: 'faar' | 'gir'
+): { vec: SentimentVec; count: number } {
   const scored = person.lenker.filter(l => {
     const pos = kind === 'faar' ? l.faarPositivScore : l.girPositivScore;
     const neg = kind === 'faar' ? l.faarNegativScore : l.girNegativScore;
-    return pos !== null && neg !== null;
+    const neu = kind === 'faar' ? l.faarNoytralScore : l.girNoytralScore;
+    return pos !== null && neg !== null && neu !== null;
   });
-  if (scored.length === 0) return { avg: 0, count: 0 };
-  const sum = scored.reduce((acc, l) => {
-    const pos = (kind === 'faar' ? l.faarPositivScore : l.girPositivScore) || 0;
-    const neg = (kind === 'faar' ? l.faarNegativScore : l.girNegativScore) || 0;
-    return acc + (pos - neg);
-  }, 0);
-  return { avg: sum / scored.length, count: scored.length };
+  if (scored.length === 0) {
+    return { vec: { neg: 0, neutral: 0, pos: 0 }, count: 0 };
+  }
+  const sum = scored.reduce(
+    (acc, l) => {
+      acc.pos += (kind === 'faar' ? l.faarPositivScore : l.girPositivScore) || 0;
+      acc.neg += (kind === 'faar' ? l.faarNegativScore : l.girNegativScore) || 0;
+      acc.neutral += (kind === 'faar' ? l.faarNoytralScore : l.girNoytralScore) || 0;
+      return acc;
+    },
+    { pos: 0, neg: 0, neutral: 0 }
+  );
+  return {
+    vec: {
+      neg: sum.neg / scored.length,
+      neutral: sum.neutral / scored.length,
+      pos: sum.pos / scored.length,
+    },
+    count: scored.length,
+  };
 }
 
 // === Små komponenter ===
@@ -91,23 +107,60 @@ function SentimentPill({ label }: { label: SentimentLabel | null | undefined }) 
   );
 }
 
-function SentimentBar({ positive, negative }: { positive: number | null; negative: number | null }) {
-  if (positive === null || negative === null) return null;
-  const total = positive + negative;
-  const posWidth = total > 0 ? (positive / total) * 100 : 50;
-  const negWidth = 100 - posWidth;
+/**
+ * Tre stablede mini-barer — én per dimensjon (negativ / nøytral / positiv).
+ * Hver rad har label, en horisontal stolpe i dimensjonens farge, og prosenten
+ * helt til høyre. Klarere enn én sammensatt stolpe fordi alle tre verdiene
+ * leses direkte uten at man må sammenligne segmenter mot hverandre.
+ */
+function SentimentBar({ vec }: { vec: SentimentVec | null }) {
+  if (vec === null) return null;
+  const dimensions = [
+    {
+      key: 'neg',
+      label: 'Negativ',
+      value: vec.neg,
+      fillClass: 'bg-rose-500',
+      textClass: 'text-rose-600 dark:text-rose-400',
+    },
+    {
+      key: 'neu',
+      label: 'Nøytral',
+      value: vec.neutral,
+      fillClass: 'bg-gray-400 dark:bg-gray-500',
+      textClass: 'text-gray-500 dark:text-gray-400',
+    },
+    {
+      key: 'pos',
+      label: 'Positiv',
+      value: vec.pos,
+      fillClass: 'bg-emerald-500',
+      textClass: 'text-emerald-600 dark:text-emerald-400',
+    },
+  ] as const;
   return (
-    <div className="flex items-center gap-2 w-full">
-      <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold min-w-[32px]">
-        {(positive * 100).toFixed(0)}%
-      </span>
-      <div className="kv-sentiment-bar flex-1">
-        <div className="kv-sentiment-bar-positive" style={{ width: `${posWidth}%` }} />
-        <div className="kv-sentiment-bar-negative" style={{ width: `${negWidth}%` }} />
-      </div>
-      <span className="text-[10px] text-rose-600 dark:text-rose-400 font-semibold min-w-[32px] text-right">
-        {(negative * 100).toFixed(0)}%
-      </span>
+    <div className="space-y-1 w-full">
+      {dimensions.map(d => {
+        const pct = Math.max(0, Math.min(100, d.value * 100));
+        return (
+          <div
+            key={d.key}
+            className="flex items-center gap-2 text-[10px] font-semibold tabular-nums"
+            title={`${d.label}: ${pct.toFixed(0)}%`}
+          >
+            <span className={`min-w-[44px] ${d.textClass}`}>{d.label}</span>
+            <div className="flex-1 h-1.5 rounded-full bg-gray-200/60 dark:bg-gray-700/60 overflow-hidden">
+              <div
+                className={`h-full rounded-full ${d.fillClass}`}
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+            <span className={`min-w-[28px] text-right ${d.textClass}`}>
+              {pct.toFixed(0)}%
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -116,21 +169,22 @@ function SentimentRow({
   heading,
   label,
   positive,
+  neutral,
   negative,
   help
 }: {
   heading: string;
   label: SentimentLabel | null;
   positive: number | null;
+  neutral: number | null;
   negative: number | null;
   help: string;
 }) {
-  if (!label && positive === null && negative === null) return null;
-  // Overstyr backend-labelen med frontend-logikk når vi har scorer, slik at
-  // artikkel-pillen alltid samsvarer med kandidat-pillen (som også bruker
-  // pos − neg med ±20-terskel). Faller tilbake til backend-labelen kun hvis
-  // scorene mangler.
-  const visningsLabel = computeSentimentFromScores(positive, negative) ?? label;
+  if (!label && positive === null && neutral === null && negative === null) return null;
+  const vec = vecFromScores(positive, neutral, negative);
+  // Speiler backend-argmax når vi har alle tre scorer; faller tilbake til
+  // backend-labelen kun hvis noen av dem mangler.
+  const visningsLabel = pickLabel(vec) ?? label;
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between gap-2">
@@ -145,7 +199,7 @@ function SentimentRow({
         </div>
         <SentimentPill label={visningsLabel} />
       </div>
-      <SentimentBar positive={positive} negative={negative} />
+      <SentimentBar vec={vec} />
     </div>
   );
 }
@@ -289,6 +343,7 @@ function ArticleWithSummary({
                 help="Sentiment i setninger hvor kandidaten er objektet – altså hvordan andre omtaler personen."
                 label={artikkel.faarSentiment}
                 positive={artikkel.faarPositivScore}
+                neutral={artikkel.faarNoytralScore}
                 negative={artikkel.faarNegativScore}
               />
               <SentimentRow
@@ -296,6 +351,7 @@ function ArticleWithSummary({
                 help="Sentiment i setninger hvor kandidaten er subjektet – altså hvordan personen omtaler andre."
                 label={artikkel.girSentiment}
                 positive={artikkel.girPositivScore}
+                neutral={artikkel.girNoytralScore}
                 negative={artikkel.girNegativScore}
               />
             </div>
@@ -633,6 +689,103 @@ type PolitikerFilter = 'regjering' | 'storting' | 'alle';
 // Nåværende stortingsperiode — oppdater ved nytt valg
 const STORTINGSPERIODE_ID = '2025-2029';
 
+/**
+ * Felles oppslagsmodell for politiker-rutene. Bygges ulikt per filter:
+ * regjering/storting itererer Stortinget-lista, "alle" itererer DB-personer
+ * og slår opp evt. matching rikspolitiker for bilde/parti.
+ */
+type DisplayItem = {
+  key: string;
+  fullName: string;
+  photoId: string | null;     // Stortinget personid for bilde; null = placeholder
+  articleCount: number;
+  partiLabel: string | null;
+  subtitle: string;
+  matchedPersonNavn: string | null;  // for onSelectPerson — null = ingen DB-data
+};
+
+/**
+ * Fleksibel navnematching mellom Stortinget-data og DB-persondata.
+ * Stortinget kan putte flere ord i "fornavn" (f.eks. "Lubna Boby" + "Jaffery"),
+ * og DB-en kan ha forkortet form ("Lubna Jaffery"). Vi godtar:
+ *  1) eksakt match,
+ *  2) første token i fornavn + siste token i etternavn,
+ *  3) alle fornavn- og etternavn-tokens er til stede.
+ */
+function nameMatches(personNavn: string, m: Rikspolitiker): boolean {
+  const fullName = `${m.fornavn} ${m.etternavn}`.toLowerCase().trim();
+  const pLc = personNavn.toLowerCase().trim();
+  if (pLc === fullName) return true;
+
+  const fornavnTokens = m.fornavn.toLowerCase().trim().split(/\s+/).filter(Boolean);
+  const etternavnTokens = m.etternavn.toLowerCase().trim().split(/\s+/).filter(Boolean);
+  const firstGiven = fornavnTokens[0] || '';
+  const lastSurname = etternavnTokens[etternavnTokens.length - 1] || '';
+
+  const parts = pLc.split(/\s+/).filter(Boolean);
+  if (parts.length < 2 || !firstGiven || !lastSurname) return false;
+
+  if (parts[0] === firstGiven && parts[parts.length - 1] === lastSurname) return true;
+
+  const pTokens = new Set(parts);
+  if (fornavnTokens.every(t => pTokens.has(t)) && etternavnTokens.every(t => pTokens.has(t))) return true;
+
+  return false;
+}
+
+/**
+ * Kortkode for parti — brukes på badgen under bildet i "alle"-modus når
+ * vi ikke har en Stortinget-match (og dermed ingen partiId). Ukjente partier
+ * faller tilbake på initialer.
+ */
+const PARTI_SHORTCODE: Record<string, string> = {
+  'Arbeiderpartiet': 'A',
+  'Høyre': 'H',
+  'Senterpartiet': 'Sp',
+  'Sosialistisk Venstreparti': 'SV',
+  'Fremskrittspartiet': 'FrP',
+  'Venstre': 'V',
+  'Kristelig Folkeparti': 'KrF',
+  'Rødt': 'R',
+  'Miljøpartiet De Grønne': 'MDG',
+  'Pasientfokus': 'PF',
+  'Industri- og Næringspartiet': 'INP',
+  'Konservativt': 'K',
+};
+
+function partiShortLabel(parti: string | null | undefined): string | null {
+  if (!parti) return null;
+  if (PARTI_SHORTCODE[parti]) return PARTI_SHORTCODE[parti];
+  const initials = parti
+    .split(/\s+/)
+    .map(w => w[0])
+    .filter(Boolean)
+    .join('')
+    .toUpperCase();
+  return initials.length > 0 && initials.length <= 4 ? initials : parti.slice(0, 3).toUpperCase();
+}
+
+/**
+ * Grå placeholder-avatar med initialer — brukes når personen ikke finnes i
+ * Stortinget-datasettet (typisk lokalpolitikere fra DB-en).
+ */
+function PlaceholderAvatar({ name }: { name: string }) {
+  const initials = name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map(w => w[0])
+    .join('')
+    .toUpperCase();
+  return (
+    <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-gray-100 to-gray-200 dark:from-gray-700 dark:to-gray-800">
+      <span className="text-base font-bold text-gray-400 dark:text-gray-500 select-none">
+        {initials || '?'}
+      </span>
+    </div>
+  );
+}
+
 function RegjeringOversikt({
   personer,
   onSelectPerson
@@ -736,19 +889,51 @@ function RegjeringOversikt({
     return () => { cancelled = true; };
   }, []);
 
-  const visible = politikere
-    .filter(p => {
-      if (filter === 'regjering') return p.erRegjering;
-      if (filter === 'storting') return !p.erVara; // faste representanter
-      return true; // alle (inkl. vara)
-    })
-    .sort((a, b) => {
-      // Regjering først sortert etter sortering, så representanter alfabetisk på etternavn
-      if (a.erRegjering && b.erRegjering) return a.sortering - b.sortering;
-      if (a.erRegjering) return -1;
-      if (b.erRegjering) return 1;
-      return a.etternavn.localeCompare(b.etternavn, 'no');
-    });
+  // Bygg listen som skal vises. "alle" itererer DB-personer (alle navn vi har
+  // omtale for, uavhengig av om de er i Stortinget-XML). De andre filtrene
+  // itererer Stortinget-data og finner DB-match for klikkbarhet.
+  const displayItems: DisplayItem[] = (() => {
+    if (filter === 'alle') {
+      return personer
+        .map<DisplayItem>(p => {
+          const m = politikere.find(rp => nameMatches(p.navn, rp));
+          return {
+            key: p.navn,
+            fullName: p.navn,
+            photoId: m?.id ?? null,
+            articleCount: p.antallArtikler,
+            partiLabel: m?.partiId ?? partiShortLabel(p.parti),
+            subtitle: m?.tittel || m?.fylke || (m?.erVara ? 'Vararepresentant' : (p.valgdistrikt || '')),
+            matchedPersonNavn: p.navn,
+          };
+        })
+        .sort((a, b) =>
+          b.articleCount - a.articleCount
+          || a.fullName.localeCompare(b.fullName, 'no'));
+    }
+
+    return politikere
+      .filter(p => filter === 'regjering' ? p.erRegjering : !p.erVara)
+      .sort((a, b) => {
+        // Regjering først sortert etter sortering, så representanter alfabetisk på etternavn
+        if (a.erRegjering && b.erRegjering) return a.sortering - b.sortering;
+        if (a.erRegjering) return -1;
+        if (b.erRegjering) return 1;
+        return a.etternavn.localeCompare(b.etternavn, 'no');
+      })
+      .map<DisplayItem>(m => {
+        const p = personer.find(pp => nameMatches(pp.navn, m));
+        return {
+          key: m.id,
+          fullName: `${m.fornavn} ${m.etternavn}`,
+          photoId: m.id,
+          articleCount: p?.antallArtikler ?? 0,
+          partiLabel: m.partiId || null,
+          subtitle: m.tittel || m.fylke || (m.erVara ? 'Vararepresentant' : ''),
+          matchedPersonNavn: p?.navn ?? null,
+        };
+      });
+  })();
 
   const filterLabels: Record<PolitikerFilter, string> = {
     regjering: 'Regjering',
@@ -759,7 +944,7 @@ function RegjeringOversikt({
   const overskrift =
     filter === 'regjering' ? 'Regjeringen' :
     filter === 'storting'  ? 'Stortinget' :
-                             'Rikspolitikere';
+                             'Alle politikere';
 
   return (
     <div className="mt-6 pt-5 border-t border-gray-200 dark:border-gray-800">
@@ -769,7 +954,7 @@ function RegjeringOversikt({
         </svg>
         <h4 className="text-sm font-bold tracking-tight">{overskrift}</h4>
         <span className="text-[10px] uppercase tracking-wider font-bold text-gray-400 dark:text-gray-500 ml-auto">
-          {loading ? 'Laster…' : error ? 'Feil' : `${visible.length}`}
+          {loading ? 'Laster…' : error ? 'Feil' : `${displayItems.length}`}
         </span>
       </div>
 
@@ -814,45 +999,14 @@ function RegjeringOversikt({
 
       {!loading && !error && (
         <div className="grid grid-cols-3 sm:grid-cols-4 gap-3 sm:gap-4 max-h-[280px] overflow-y-auto sidebar-scrollbar pr-1">
-          {visible.map(m => {
-            const fullName = `${m.fornavn} ${m.etternavn}`;
-
-            // Split fornavn/etternavn hver for seg — Stortinget kan putte flere ord i "fornavn"
-            // (f.eks. fornavn="Lubna Boby" etternavn="Jaffery")
-            const fornavnTokens = m.fornavn.toLowerCase().trim().split(/\s+/).filter(Boolean);
-            const etternavnTokens = m.etternavn.toLowerCase().trim().split(/\s+/).filter(Boolean);
-            const firstGiven = fornavnTokens[0] || '';
-            const lastSurname = etternavnTokens[etternavnTokens.length - 1] || '';
-
-            // Fleksibel matching: datasettet kan ha forkortet navn uten mellomnavn
-            const match = personer.find(p => {
-              const pLc = p.navn.toLowerCase().trim();
-              // 1) Eksakt match på hele navnet
-              if (pLc === fullName.toLowerCase()) return true;
-
-              const parts = pLc.split(/\s+/).filter(Boolean);
-              if (parts.length < 2 || !firstGiven || !lastSurname) return false;
-
-              // 2) Første ord matcher fornavnets første token OG siste ord matcher etternavnets siste token
-              //    Dekker: "Lubna Jaffery" ↔ "Lubna Boby Jaffery", "Jonas Støre" ↔ "Jonas Gahr Støre"
-              const first = parts[0];
-              const last = parts[parts.length - 1];
-              if (first === firstGiven && last === lastSurname) return true;
-
-              // 3) Fallback: personens fornavn+etternavn-tokens er alle til stede i datasett-navnet
-              const pTokens = new Set(parts);
-              const allGivenPresent = fornavnTokens.every(t => pTokens.has(t));
-              const allSurnamePresent = etternavnTokens.every(t => pTokens.has(t));
-              if (allGivenPresent && allSurnamePresent) return true;
-
-              return false;
-            });
-            const hasData = !!match;
+          {displayItems.map(item => {
+            const hasData = item.matchedPersonNavn !== null;
+            const showCountBadge = hasData && item.articleCount > 0;
             return (
               <button
-                key={m.id}
+                key={item.key}
                 type="button"
-                onClick={() => hasData && onSelectPerson(match!.navn)}
+                onClick={() => hasData && onSelectPerson(item.matchedPersonNavn!)}
                 disabled={!hasData}
                 className={`flex flex-col items-center text-center group rounded-lg p-1 -m-1 transition-all ${
                   hasData
@@ -861,8 +1015,8 @@ function RegjeringOversikt({
                 }`}
                 title={
                   hasData
-                    ? `Se stats for ${fullName} (${match!.antallArtikler} artikler)`
-                    : `${fullName} — ingen omtale i datasettet`
+                    ? `Se stats for ${item.fullName} (${item.articleCount} ${item.articleCount === 1 ? 'artikkel' : 'artikler'})`
+                    : `${item.fullName} — ingen omtale i datasettet`
                 }
               >
                 <div className={`relative w-[72px] h-[96px] rounded-lg overflow-hidden border shadow-sm transition-all ${
@@ -870,28 +1024,34 @@ function RegjeringOversikt({
                     ? 'border-gray-200 dark:border-gray-700 group-hover:shadow-md group-hover:-translate-y-0.5 group-hover:border-indigo-400 dark:group-hover:border-indigo-500'
                     : 'border-gray-200 dark:border-gray-700 grayscale'
                 }`}>
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={`https://data.stortinget.no/eksport/personbilde?personid=${encodeURIComponent(m.id)}&storrelse=lite&erstatningsbilde=true`}
-                    alt={fullName}
-                    className="w-full h-full object-cover"
-                    loading="lazy"
-                  />
-                  {hasData && (
+                  {item.photoId ? (
+                    /* eslint-disable-next-line @next/next/no-img-element */
+                    <img
+                      src={`https://data.stortinget.no/eksport/personbilde?personid=${encodeURIComponent(item.photoId)}&storrelse=lite&erstatningsbilde=true`}
+                      alt={item.fullName}
+                      className="w-full h-full object-cover"
+                      loading="lazy"
+                    />
+                  ) : (
+                    <PlaceholderAvatar name={item.fullName} />
+                  )}
+                  {showCountBadge && (
                     <span className="absolute top-1 right-1 text-[9px] font-extrabold px-1.5 py-0.5 rounded-md bg-indigo-600 text-white shadow-sm tabular-nums">
-                      {match!.antallArtikler}
+                      {item.articleCount}
                     </span>
                   )}
                 </div>
                 <p className="mt-1.5 text-[11px] font-bold truncate max-w-full leading-tight">
-                  {fullName}
+                  {item.fullName}
                 </p>
-                <p className="text-[10px] text-gray-500 dark:text-gray-400 truncate max-w-full leading-tight mt-0.5">
-                  {m.tittel || m.fylke || (m.erVara ? 'Vararepresentant' : '')}
-                </p>
-                {m.partiId && (
+                {item.subtitle && (
+                  <p className="text-[10px] text-gray-500 dark:text-gray-400 truncate max-w-full leading-tight mt-0.5">
+                    {item.subtitle}
+                  </p>
+                )}
+                {item.partiLabel && (
                   <span className="mt-1 text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300">
-                    {m.partiId}
+                    {item.partiLabel}
                   </span>
                 )}
               </button>
@@ -906,32 +1066,40 @@ function RegjeringOversikt({
 /**
  * Render én kompakt sentiment-pille med prefiks-label, brukt på kandidatraden
  * for å skille FAAR (om kandidaten) fra GIR (av kandidaten).
+ *
+ * Argmax over (neg, nøytral, pos) gir labelen — eksakt samme regel som
+ * artikkel-pillen og som backend, så de tre kan ikke være uenige. Tallet i
+ * pillen er konfidensen til den vinnende klassen.
  */
-function MiniSentimentPill({ avg, count, prefix, tooltip }: {
-  avg: number;
+function MiniSentimentPill({ vec, count, prefix, tooltip }: {
+  vec: SentimentVec;
   count: number;
   prefix: string;
   tooltip: string;
 }) {
   if (count === 0) return null;
-  const pct = Math.max(-100, Math.min(100, avg * 100));
-  const tone = pct > 20 ? "positive" : pct < -20 ? "negative" : "neutral";
-  const cls = tone === "positive" ? "kv-sentiment kv-sentiment-positive"
-    : tone === "negative" ? "kv-sentiment kv-sentiment-negative"
+  const label = pickLabel(vec);
+  const dominantPct =
+    label === "POSITIV" ? vec.pos * 100
+    : label === "NEGATIV" ? vec.neg * 100
+    : vec.neutral * 100;
+  const cls = label === "POSITIV" ? "kv-sentiment kv-sentiment-positive"
+    : label === "NEGATIV" ? "kv-sentiment kv-sentiment-negative"
     : "kv-sentiment kv-sentiment-neutral";
-  const text = tone === "positive" ? "Positiv" : tone === "negative" ? "Negativ" : "Nøytral";
+  const text = label === "POSITIV" ? "Positiv" : label === "NEGATIV" ? "Negativ" : "Nøytral";
+  const icon = label === "POSITIV" ? "▲" : label === "NEGATIV" ? "▼" : "■";
   return (
     <span className={cls} title={tooltip}>
       <span className="text-[9px] opacity-60 mr-1 font-bold uppercase tracking-wider">{prefix}</span>
-      <span aria-hidden>{tone === "positive" ? "▲" : tone === "negative" ? "▼" : "■"}</span>
-      {text} · {pct > 0 ? "+" : ""}{pct.toFixed(0)}
+      <span aria-hidden>{icon}</span>
+      {text} · {dominantPct.toFixed(0)}%
     </span>
   );
 }
 
 function CandidateSentimentSummary({ person }: { person: Person }) {
-  const faar = aggregateScore(person, 'faar');
-  const gir = aggregateScore(person, 'gir');
+  const faar = aggregateScores(person, 'faar');
+  const gir = aggregateScores(person, 'gir');
 
   // Ingen sentiment-data i det hele tatt (verken FAAR eller GIR analysert)
   if (faar.count === 0 && gir.count === 0) {
@@ -942,19 +1110,26 @@ function CandidateSentimentSummary({ person }: { person: Person }) {
     );
   }
 
+  const formatTooltip = (kind: 'omtalt' | 'sier', vec: SentimentVec, count: number) => {
+    const subject = kind === 'omtalt' ? 'Hvordan kandidaten omtales av andre' : 'Hvordan kandidaten omtaler andre';
+    const artikler = `${count} ${count === 1 ? 'artikkel' : 'artikler'}`;
+    return `${subject} (gjennomsnitt over ${artikler})\n`
+      + `Negativ ${(vec.neg * 100).toFixed(0)}% · Nøytral ${(vec.neutral * 100).toFixed(0)}% · Positiv ${(vec.pos * 100).toFixed(0)}%`;
+  };
+
   return (
     <div className="flex flex-col gap-1 items-end">
       <MiniSentimentPill
-        avg={faar.avg}
+        vec={faar.vec}
         count={faar.count}
         prefix="Omtalt"
-        tooltip={`Hvordan kandidaten omtales av andre (gjennomsnitt over ${faar.count} ${faar.count === 1 ? 'artikkel' : 'artikler'})`}
+        tooltip={formatTooltip('omtalt', faar.vec, faar.count)}
       />
       <MiniSentimentPill
-        avg={gir.avg}
+        vec={gir.vec}
         count={gir.count}
         prefix="Sier"
-        tooltip={`Hvordan kandidaten omtaler andre (gjennomsnitt over ${gir.count} ${gir.count === 1 ? 'artikkel' : 'artikler'})`}
+        tooltip={formatTooltip('sier', gir.vec, gir.count)}
       />
     </div>
   );

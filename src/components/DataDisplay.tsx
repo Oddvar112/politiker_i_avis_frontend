@@ -13,6 +13,15 @@ interface DataDisplayProps {
 }
 
 // === Sentiment-hjelpere ===
+
+/**
+ * Terskel (på 0-1-skalaen) for forskjellen mellom positiv og negativ konfidens
+ * før vi kaller det noe annet enn nøytral. Tilsvarer ±20 på pct-skalaen som
+ * brukes i kandidat-pillen — så artikkel-pille og kandidat-pille bruker
+ * eksakt samme logikk og kan ikke være uenige.
+ */
+const FRONTEND_NEUTRAL_THRESHOLD = 0.20;
+
 function sentimentMeta(label: SentimentLabel | null | undefined) {
   switch (label) {
     case "POSITIV":
@@ -26,15 +35,47 @@ function sentimentMeta(label: SentimentLabel | null | undefined) {
   }
 }
 
+/**
+ * Klassifiser sentiment ut fra (positiv, negativ)-scorer ved å bruke samme
+ * regel som kandidat-snittet: |pos − neg| ≤ terskel → NOYTRAL, ellers vinner
+ * den største. Overstyrer backend-labelen (som bruker max < 0.6 og av og til
+ * gir andre svar enn frontend-snittet).
+ */
+function computeSentimentFromScores(
+  positive: number | null,
+  negative: number | null
+): SentimentLabel | null {
+  if (positive === null || negative === null) return null;
+  const diff = positive - negative;
+  if (Math.abs(diff) <= FRONTEND_NEUTRAL_THRESHOLD) return "NOYTRAL";
+  return diff > 0 ? "POSITIV" : "NEGATIV";
+}
+
 function hasSentiment(a: ArtikelDTO): boolean {
   return !!(a.girSentiment || a.faarSentiment);
 }
 
-/** Beregner en aggregert sentiment-score (-1 til 1) per person basert på faar-scores. */
-function aggregateFaarScore(person: Person): { avg: number; count: number } {
-  const scored = person.lenker.filter(l => l.faarPositivScore !== null && l.faarNegativScore !== null);
+/**
+ * Beregner aggregert sentiment-score (-1 til 1) per person.
+ * `kind = 'faar'` = hvordan kandidaten omtales av andre.
+ * `kind = 'gir'` = hvordan kandidaten omtaler andre.
+ *
+ * Tar med ALLE artikler som har scorer (også de backenden labelet NOYTRAL)
+ * — frontenden bruker sin egen ±20-terskel både her og på artikkel-pillen,
+ * så de er garantert konsistente.
+ */
+function aggregateScore(person: Person, kind: 'faar' | 'gir'): { avg: number; count: number } {
+  const scored = person.lenker.filter(l => {
+    const pos = kind === 'faar' ? l.faarPositivScore : l.girPositivScore;
+    const neg = kind === 'faar' ? l.faarNegativScore : l.girNegativScore;
+    return pos !== null && neg !== null;
+  });
   if (scored.length === 0) return { avg: 0, count: 0 };
-  const sum = scored.reduce((acc, l) => acc + ((l.faarPositivScore || 0) - (l.faarNegativScore || 0)), 0);
+  const sum = scored.reduce((acc, l) => {
+    const pos = (kind === 'faar' ? l.faarPositivScore : l.girPositivScore) || 0;
+    const neg = (kind === 'faar' ? l.faarNegativScore : l.girNegativScore) || 0;
+    return acc + (pos - neg);
+  }, 0);
   return { avg: sum / scored.length, count: scored.length };
 }
 
@@ -85,6 +126,11 @@ function SentimentRow({
   help: string;
 }) {
   if (!label && positive === null && negative === null) return null;
+  // Overstyr backend-labelen med frontend-logikk når vi har scorer, slik at
+  // artikkel-pillen alltid samsvarer med kandidat-pillen (som også bruker
+  // pos − neg med ±20-terskel). Faller tilbake til backend-labelen kun hvis
+  // scorene mangler.
+  const visningsLabel = computeSentimentFromScores(positive, negative) ?? label;
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between gap-2">
@@ -97,7 +143,7 @@ function SentimentRow({
             ⓘ
           </span>
         </div>
-        <SentimentPill label={label} />
+        <SentimentPill label={visningsLabel} />
       </div>
       <SentimentBar positive={positive} negative={negative} />
     </div>
@@ -857,15 +903,17 @@ function RegjeringOversikt({
   );
 }
 
-function CandidateSentimentSummary({ person }: { person: Person }) {
-  const { avg, count } = aggregateFaarScore(person);
-  if (count === 0) {
-    return (
-      <span className="kv-sentiment kv-sentiment-neutral">
-        Sentiment kommer
-      </span>
-    );
-  }
+/**
+ * Render én kompakt sentiment-pille med prefiks-label, brukt på kandidatraden
+ * for å skille FAAR (om kandidaten) fra GIR (av kandidaten).
+ */
+function MiniSentimentPill({ avg, count, prefix, tooltip }: {
+  avg: number;
+  count: number;
+  prefix: string;
+  tooltip: string;
+}) {
+  if (count === 0) return null;
   const pct = Math.max(-100, Math.min(100, avg * 100));
   const tone = pct > 20 ? "positive" : pct < -20 ? "negative" : "neutral";
   const cls = tone === "positive" ? "kv-sentiment kv-sentiment-positive"
@@ -873,10 +921,42 @@ function CandidateSentimentSummary({ person }: { person: Person }) {
     : "kv-sentiment kv-sentiment-neutral";
   const text = tone === "positive" ? "Positiv" : tone === "negative" ? "Negativ" : "Nøytral";
   return (
-    <span className={cls} title={`Gjennomsnittlig sentiment på tvers av ${count} analyserte artikler`}>
+    <span className={cls} title={tooltip}>
+      <span className="text-[9px] opacity-60 mr-1 font-bold uppercase tracking-wider">{prefix}</span>
       <span aria-hidden>{tone === "positive" ? "▲" : tone === "negative" ? "▼" : "■"}</span>
       {text} · {pct > 0 ? "+" : ""}{pct.toFixed(0)}
     </span>
+  );
+}
+
+function CandidateSentimentSummary({ person }: { person: Person }) {
+  const faar = aggregateScore(person, 'faar');
+  const gir = aggregateScore(person, 'gir');
+
+  // Ingen sentiment-data i det hele tatt (verken FAAR eller GIR analysert)
+  if (faar.count === 0 && gir.count === 0) {
+    return (
+      <span className="kv-sentiment kv-sentiment-neutral">
+        Sentiment kommer
+      </span>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-1 items-end">
+      <MiniSentimentPill
+        avg={faar.avg}
+        count={faar.count}
+        prefix="Omtalt"
+        tooltip={`Hvordan kandidaten omtales av andre (gjennomsnitt over ${faar.count} ${faar.count === 1 ? 'artikkel' : 'artikler'})`}
+      />
+      <MiniSentimentPill
+        avg={gir.avg}
+        count={gir.count}
+        prefix="Sier"
+        tooltip={`Hvordan kandidaten omtaler andre (gjennomsnitt over ${gir.count} ${gir.count === 1 ? 'artikkel' : 'artikler'})`}
+      />
+    </div>
   );
 }
 

@@ -339,16 +339,16 @@ function ArticleWithSummary({
           {sentimentAvailable && (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-gray-100 dark:border-gray-800">
               <SentimentRow
-                heading="Hvordan kandidaten blir omtalt"
-                help="Sentiment i setninger hvor kandidaten er objektet – altså hvordan andre omtaler personen."
+                heading="Sum av setningssentiment om kandidaten"
+                help="Summen av sentimentet i alle setninger i artikkelen der kandidaten er objektet – altså hvordan andre omtaler personen."
                 label={artikkel.faarSentiment}
                 positive={artikkel.faarPositivScore}
                 neutral={artikkel.faarNoytralScore}
                 negative={artikkel.faarNegativScore}
               />
               <SentimentRow
-                heading="Hvordan kandidaten omtaler annet"
-                help="Sentiment i setninger hvor kandidaten er subjektet – altså hvordan personen omtaler andre."
+                heading="Sum av setningssentiment fra kandidaten"
+                help="Summen av sentimentet i alle setninger i artikkelen der kandidaten er subjektet – altså hvordan personen omtaler andre."
                 label={artikkel.girSentiment}
                 positive={artikkel.girPositivScore}
                 neutral={artikkel.girNoytralScore}

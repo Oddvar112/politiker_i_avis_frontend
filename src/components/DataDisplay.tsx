@@ -187,17 +187,26 @@ function SentimentRow({
   const visningsLabel = pickLabel(vec) ?? label;
   return (
     <div className="space-y-1.5">
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-semibold text-gray-700 dark:text-gray-300">{heading}</span>
+      {/*
+        Mobil: heading + pill stables vertikalt så lange headings kan
+        bryte naturlig uten å skvise pillen.
+        sm+: side-om-side med justify-between.
+      */}
+      <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between sm:gap-2">
+        <div className="flex items-start gap-2 min-w-0">
+          <span className="text-xs font-semibold text-gray-700 dark:text-gray-300 leading-snug">
+            {heading}
+          </span>
           <span
-            className="text-[10px] text-gray-400 dark:text-gray-500 cursor-help"
+            className="text-[10px] text-gray-400 dark:text-gray-500 cursor-help flex-shrink-0 mt-0.5"
             title={help}
           >
             ⓘ
           </span>
         </div>
-        <SentimentPill label={visningsLabel} />
+        <div className="flex-shrink-0">
+          <SentimentPill label={visningsLabel} />
+        </div>
       </div>
       <SentimentBar vec={vec} />
     </div>
@@ -1502,8 +1511,9 @@ export default function DataDisplay({ data, isLoading, error, dateRange, onDateR
 
                 {isExpanded && sortedLenker.length > 0 && (
                   <div className="p-4 sm:p-5 border-t border-gray-200 dark:border-gray-800 bg-gradient-to-b from-gray-50/60 to-transparent dark:from-gray-900/60 dark:to-transparent">
-                    <div className="flex items-center justify-between mb-4">
-                      <div className="flex items-center gap-2">
+                    {/* Mobil: stables vertikalt så pillene får egen rad og ikke skvises av "Artikler · 5 · Nyeste først". */}
+                    <div className="flex flex-col gap-2 mb-4 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <h5 className="text-sm font-bold text-gray-700 dark:text-gray-200 tracking-tight">
                           Artikler
                         </h5>

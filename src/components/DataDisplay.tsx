@@ -50,6 +50,11 @@ function vecFromScores(
   negative: number | null
 ): SentimentVec | null {
   if (positive === null || neutral === null || negative === null) return null;
+  // Backend lagrer (pos=0, neutral=1, neg=0) som fallback når en dimensjon
+  // (GIR/FAAR) ikke har klassifiserte setninger i artikkelen. Ekte softmax-
+  // output gir aldri eksakt 0 eller 1, så dette mønsteret er en pålitelig
+  // sentinel for "ingen analyse i denne dimensjonen" og ekskluderes.
+  if (positive === 0 && neutral === 1 && negative === 0) return null;
   return { neg: negative, neutral, pos: positive };
 }
 
@@ -67,31 +72,32 @@ function aggregateScores(
   person: Person,
   kind: 'faar' | 'gir'
 ): { vec: SentimentVec; count: number } {
-  const scored = person.lenker.filter(l => {
-    const pos = kind === 'faar' ? l.faarPositivScore : l.girPositivScore;
-    const neg = kind === 'faar' ? l.faarNegativScore : l.girNegativScore;
-    const neu = kind === 'faar' ? l.faarNoytralScore : l.girNoytralScore;
-    return pos !== null && neg !== null && neu !== null;
-  });
-  if (scored.length === 0) {
+  const vecs = person.lenker
+    .map(l => vecFromScores(
+      kind === 'faar' ? l.faarPositivScore : l.girPositivScore,
+      kind === 'faar' ? l.faarNoytralScore : l.girNoytralScore,
+      kind === 'faar' ? l.faarNegativScore : l.girNegativScore,
+    ))
+    .filter((v): v is SentimentVec => v !== null);
+  if (vecs.length === 0) {
     return { vec: { neg: 0, neutral: 0, pos: 0 }, count: 0 };
   }
-  const sum = scored.reduce(
-    (acc, l) => {
-      acc.pos += (kind === 'faar' ? l.faarPositivScore : l.girPositivScore) || 0;
-      acc.neg += (kind === 'faar' ? l.faarNegativScore : l.girNegativScore) || 0;
-      acc.neutral += (kind === 'faar' ? l.faarNoytralScore : l.girNoytralScore) || 0;
+  const sum = vecs.reduce(
+    (acc, v) => {
+      acc.pos += v.pos;
+      acc.neg += v.neg;
+      acc.neutral += v.neutral;
       return acc;
     },
     { pos: 0, neg: 0, neutral: 0 }
   );
   return {
     vec: {
-      neg: sum.neg / scored.length,
-      neutral: sum.neutral / scored.length,
-      pos: sum.pos / scored.length,
+      neg: sum.neg / vecs.length,
+      neutral: sum.neutral / vecs.length,
+      pos: sum.pos / vecs.length,
     },
-    count: scored.length,
+    count: vecs.length,
   };
 }
 
@@ -205,7 +211,13 @@ function SentimentRow({
           </span>
         </div>
         <div className="flex-shrink-0">
-          <SentimentPill label={visningsLabel} />
+          {vec === null ? (
+            <span className="text-xs italic text-gray-400 dark:text-gray-500">
+              Ingen setninger funnet
+            </span>
+          ) : (
+            <SentimentPill label={visningsLabel} />
+          )}
         </div>
       </div>
       <SentimentBar vec={vec} />
